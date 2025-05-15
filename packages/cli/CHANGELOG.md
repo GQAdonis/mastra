@@ -1,5 +1,17 @@
 # mastra
 
+## 0.6.4-alpha.0
+
+### Patch Changes
+
+- e2c2cf1: Persist playground agent settings across refresh
+- 1270183: Add waterfull traces instead of stacked progressbar (UI improvement mostly)
+- Updated dependencies [f53a6ac]
+- Updated dependencies [48e5910]
+- Updated dependencies [23f258c]
+  - @mastra/core@0.9.5-alpha.0
+  - @mastra/deployer@0.3.5-alpha.0
+
 ## 0.6.3
 
 ### Patch Changes

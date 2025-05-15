@@ -1,5 +1,16 @@
 # @mastra/deployer
 
+## 0.3.5-alpha.0
+
+### Patch Changes
+
+- 48e5910: Mastra server hostname, fallback to undefined
+- 23f258c: Add new list and get routes for mcp servers. Changed route make-up for more consistency with existing API routes. Lastly, added in a lot of extra detail that can be optionally passed to the mcp server per the mcp spec.
+- Updated dependencies [f53a6ac]
+- Updated dependencies [23f258c]
+  - @mastra/server@2.0.5-alpha.0
+  - @mastra/core@0.9.5-alpha.0
+
 ## 0.3.4
 
 ### Patch Changes

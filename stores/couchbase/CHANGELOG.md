@@ -1,5 +1,13 @@
 # @mastra/couchbase
 
+## 0.0.5-alpha.0
+
+### Patch Changes
+
+- Updated dependencies [f53a6ac]
+- Updated dependencies [23f258c]
+  - @mastra/core@0.9.5-alpha.0
+
 ## 0.0.4
 
 ### Patch Changes

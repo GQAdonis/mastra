@@ -1,5 +1,12 @@
 # @mastra/core
 
+## 0.9.5-alpha.0
+
+### Patch Changes
+
+- f53a6ac: Add VNextWorkflowRuns type
+- 23f258c: Add new list and get routes for mcp servers. Changed route make-up for more consistency with existing API routes. Lastly, added in a lot of extra detail that can be optionally passed to the mcp server per the mcp spec.
+
 ## 0.9.4
 
 ### Patch Changes

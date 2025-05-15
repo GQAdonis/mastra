@@ -1,5 +1,14 @@
 # @mastra/inngest
 
+## 0.0.4-alpha.0
+
+### Patch Changes
+
+- e4172d9: Update getWorkflowRuns type for inngest workflow
+- Updated dependencies [f53a6ac]
+- Updated dependencies [23f258c]
+  - @mastra/core@0.9.5-alpha.0
+
 ## 0.0.3
 
 ### Patch Changes

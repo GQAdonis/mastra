@@ -1,5 +1,19 @@
 # @mastra/playground-ui
 
+## 5.0.5-alpha.0
+
+### Patch Changes
+
+- e2c2cf1: Persist playground agent settings across refresh
+- 1270183: Add waterfull traces instead of stacked progressbar (UI improvement mostly)
+- Updated dependencies [f53a6ac]
+- Updated dependencies [ccdabdc]
+- Updated dependencies [a6e3881]
+- Updated dependencies [fddae56]
+- Updated dependencies [23f258c]
+  - @mastra/client-js@0.1.23-alpha.0
+  - @mastra/core@0.9.5-alpha.0
+
 ## 5.0.4
 
 ### Patch Changes

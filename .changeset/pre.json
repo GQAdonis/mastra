@@ -69,5 +69,16 @@
     "@mastra/voice-speechify": "0.1.18",
     "@mastra/inngest": "0.0.3"
   },
-  "changesets": []
+  "changesets": [
+    "fluffy-stars-marry",
+    "grumpy-chicken-push",
+    "honest-rocks-stop",
+    "little-bees-slide",
+    "new-teams-cover",
+    "old-items-hear",
+    "quiet-olives-taste",
+    "ready-bees-sin",
+    "rich-swans-vanish",
+    "shy-parrots-hunt"
+  ]
 }

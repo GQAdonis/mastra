@@ -34,13 +34,13 @@ importers:
         specifier: ^20.19.21
         version: 20.19.23
       changesets-changelog-github-local:
-        specifier: ^1.0.0
+        specifier: ^1.0.1
         version: 1.0.1
       husky:
         specifier: ^9.1.7
         version: 9.1.7
       lint-staged:
-        specifier: ^16.1.6
+        specifier: ^16.2.6
         version: 16.2.6
       npm-run-all2:
         specifier: ^8.0.4
@@ -49,7 +49,7 @@ importers:
         specifier: ^3.6.2
         version: 3.6.2
       semver:
-        specifier: ^7.7.2
+        specifier: ^7.7.3
         version: 7.7.3
       turbo:
         specifier: ^2.5.8

@@ -1,0 +1,46 @@
+# Verdaccio Configuration for Local Mastra Registry
+storage: ./storage
+auth:
+  htpasswd:
+    file: ./htpasswd
+    # Maximum amount of users allowed to register, defaults to "+inf".
+    max_users: 1000
+    # Hash algorithm, possible options are: "bcrypt", "md5", "sha1", "crypt".
+    algorithm: bcrypt
+
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    timeout: 30s
+
+packages:
+  # Your private Mastra packages
+  '@yourcompany/*':
+    access: $authenticated
+    publish: $authenticated
+    unpublish: $authenticated
+
+  # All other packages proxy to npmjs
+  '**':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+
+server:
+  keepAliveTimeout: 60
+
+middlewares:
+  audit:
+    enabled: true
+
+logs:
+  - { type: stdout, format: pretty, level: http }
+
+# Listen on all interfaces for local development
+listen: 0.0.0.0:4873
+
+web:
+  title: Your Company Mastra Registry
+  logo: https://verdaccio.org/img/logo/banner/png/verdaccio-banner@2x.png
+  gravatar: true
+  scope: '@yourcompany'

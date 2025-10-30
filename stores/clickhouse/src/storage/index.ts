@@ -7,27 +7,20 @@ import type { ScoreRowData, ScoringSource } from '@mastra/core/scores';
 import { MastraStorage } from '@mastra/core/storage';
 import type {
   TABLE_SCHEMAS,
-  EvalRow,
   PaginationInfo,
   StorageColumn,
   StorageGetMessagesArg,
   TABLE_NAMES,
   WorkflowRun,
   WorkflowRuns,
-  StorageGetTracesArg,
-  StorageGetTracesPaginatedArg,
   StoragePagination,
   StorageDomains,
-  PaginationArgs,
   StorageResourceType,
 } from '@mastra/core/storage';
-import type { Trace } from '@mastra/core/telemetry';
-import type { WorkflowRunState } from '@mastra/core/workflows';
-import { LegacyEvalsStorageClickhouse } from './domains/legacy-evals';
+import type { StepResult, WorkflowRunState } from '@mastra/core/workflows';
 import { MemoryStorageClickhouse } from './domains/memory';
 import { StoreOperationsClickhouse } from './domains/operations';
 import { ScoresStorageClickhouse } from './domains/scores';
-import { TracesStorageClickhouse } from './domains/traces';
 import { WorkflowsStorageClickhouse } from './domains/workflows';
 
 type IntervalUnit =
@@ -86,16 +79,12 @@ export class ClickhouseStore extends MastraStorage {
     const operations = new StoreOperationsClickhouse({ client: this.db, ttl: this.ttl });
     const workflows = new WorkflowsStorageClickhouse({ client: this.db, operations });
     const scores = new ScoresStorageClickhouse({ client: this.db, operations });
-    const legacyEvals = new LegacyEvalsStorageClickhouse({ client: this.db, operations });
-    const traces = new TracesStorageClickhouse({ client: this.db, operations });
     const memory = new MemoryStorageClickhouse({ client: this.db, operations });
 
     this.stores = {
       operations,
       workflows,
       scores,
-      legacyEvals,
-      traces,
       memory,
     };
   }
@@ -106,6 +95,7 @@ export class ClickhouseStore extends MastraStorage {
     hasColumn: boolean;
     createTable: boolean;
     deleteMessages: boolean;
+    getScoresBySpan: boolean;
   } {
     return {
       selectByIncludeResourceScope: true,
@@ -113,17 +103,8 @@ export class ClickhouseStore extends MastraStorage {
       hasColumn: true,
       createTable: true,
       deleteMessages: false,
+      getScoresBySpan: true,
     };
-  }
-
-  async getEvalsByAgentName(agentName: string, type?: 'test' | 'live'): Promise<EvalRow[]> {
-    return this.stores.legacyEvals.getEvalsByAgentName(agentName, type);
-  }
-
-  async getEvals(
-    options: { agentName?: string; type?: 'test' | 'live' } & PaginationArgs,
-  ): Promise<PaginationInfo & { evals: EvalRow[] }> {
-    return this.stores.legacyEvals.getEvals(options);
   }
 
   async batchInsert({ tableName, records }: { tableName: TABLE_NAMES; records: Record<string, any>[] }): Promise<void> {
@@ -205,16 +186,52 @@ export class ClickhouseStore extends MastraStorage {
     return this.stores.operations.load({ tableName, keys });
   }
 
+  async updateWorkflowResults({
+    workflowName,
+    runId,
+    stepId,
+    result,
+    runtimeContext,
+  }: {
+    workflowName: string;
+    runId: string;
+    stepId: string;
+    result: StepResult<any, any, any, any>;
+    runtimeContext: Record<string, any>;
+  }): Promise<Record<string, StepResult<any, any, any, any>>> {
+    return this.stores.workflows.updateWorkflowResults({ workflowName, runId, stepId, result, runtimeContext });
+  }
+
+  async updateWorkflowState({
+    workflowName,
+    runId,
+    opts,
+  }: {
+    workflowName: string;
+    runId: string;
+    opts: {
+      status: string;
+      result?: StepResult<any, any, any, any>;
+      error?: string;
+      suspendedPaths?: Record<string, number[]>;
+      waitingPaths?: Record<string, number[]>;
+    };
+  }): Promise<WorkflowRunState | undefined> {
+    return this.stores.workflows.updateWorkflowState({ workflowName, runId, opts });
+  }
+
   async persistWorkflowSnapshot({
     workflowName,
     runId,
+    resourceId,
     snapshot,
   }: {
     workflowName: string;
     runId: string;
+    resourceId?: string;
     snapshot: WorkflowRunState;
   }): Promise<void> {
-    return this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, snapshot });
+    return this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, resourceId, snapshot });
   }
 
   async loadWorkflowSnapshot({
@@ -253,18 +270,6 @@ export class ClickhouseStore extends MastraStorage {
     workflowName?: string;
   }): Promise<WorkflowRun | null> {
     return this.stores.workflows.getWorkflowRunById({ runId, workflowName });
-  }
-
-  async getTraces(args: StorageGetTracesArg): Promise<any[]> {
-    return this.stores.traces.getTraces(args);
-  }
-
-  async getTracesPaginated(args: StorageGetTracesPaginatedArg): Promise<PaginationInfo & { traces: Trace[] }> {
-    return this.stores.traces.getTracesPaginated(args);
-  }
-
-  async batchTraceInsert(args: { records: Trace[] }): Promise<void> {
-    return this.stores.traces.batchTraceInsert(args);
   }
 
   async getThreadById({ threadId }: { threadId: string }): Promise<StorageThreadType | null> {
@@ -312,6 +317,18 @@ export class ClickhouseStore extends MastraStorage {
     format,
   }: StorageGetMessagesArg & { format?: 'v1' | 'v2' }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
     return this.stores.memory.getMessages({ threadId, resourceId, selectBy, format });
+  }
+
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format: 'v1' }): Promise<MastraMessageV1[]>;
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format?: 'v2' }): Promise<MastraMessageV2[]>;
+  async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    return this.stores.memory.getMessagesById({ messageIds, format });
   }
 
   async saveMessages(args: { messages: MastraMessageV1[]; format?: undefined | 'v1' }): Promise<MastraMessageV1[]>;
@@ -402,6 +419,18 @@ export class ClickhouseStore extends MastraStorage {
     source?: ScoringSource;
   }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
     return this.stores.scores.getScoresByScorerId({ scorerId, pagination, entityId, entityType, source });
+  }
+
+  async getScoresBySpan({
+    traceId,
+    spanId,
+    pagination,
+  }: {
+    traceId: string;
+    spanId: string;
+    pagination: StoragePagination;
+  }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
+    return this.stores.scores.getScoresBySpan({ traceId, spanId, pagination });
   }
 
   async close(): Promise<void> {

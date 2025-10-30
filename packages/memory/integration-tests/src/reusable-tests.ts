@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
-import type { MastraMessageV1, SharedMemoryConfig } from '@mastra/core';
 import { MessageList } from '@mastra/core/agent';
+import type { MastraMessageV1, SharedMemoryConfig } from '@mastra/core/memory';
 import type { LibSQLConfig, LibSQLVectorConfig } from '@mastra/libsql';
 import type { Memory } from '@mastra/memory';
-import type { PostgresConfig } from '@mastra/pg';
+import type { PostgresStoreConfig } from '@mastra/pg';
 import type { UpstashConfig } from '@mastra/upstash';
 import type { ToolResultPart, TextPart, ToolCallPart } from 'ai';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -21,7 +21,7 @@ export enum StorageType {
 
 interface WorkerTestConfig {
   storageTypeForWorker: StorageType;
-  storageConfigForWorker: LibSQLConfig | PostgresConfig | UpstashConfig;
+  storageConfigForWorker: LibSQLConfig | PostgresStoreConfig | UpstashConfig;
   vectorConfigForWorker?: LibSQLVectorConfig;
   memoryOptionsForWorker?: SharedMemoryConfig['options'];
 }
@@ -379,7 +379,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
         const result = await memory.rememberMessages({
           threadId: thread.id,
           resourceId,
-          config: { lastMessages: 0, semanticRecall: { messageRange: 0, topK: 1 } },
+          config: { lastMessages: 0, semanticRecall: { messageRange: 0, topK: 1, scope: 'thread' } },
           vectorMessageSearch: 'world',
         });
         const contents = result.messages.map(m =>
@@ -405,7 +405,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
         const result = await memory.rememberMessages({
           threadId: thread.id,
           resourceId,
-          config: { lastMessages: 0, semanticRecall: { messageRange: 0, topK: 1 } },
+          config: { lastMessages: 0, semanticRecall: { messageRange: 0, topK: 1, scope: 'thread' } },
           vectorMessageSearch: 'assistant',
         });
         const contents = result.messages.map(m =>
@@ -439,7 +439,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
 
         const searchQuery = 'Tell me about the color blue';
 
-        // 1. Test default scope (thread)
+        // 1. Test thread scope (explicitly set)
         const threadScopeResult = await memory.rememberMessages({
           threadId: thread1.id,
           resourceId, // resourceId is defined globally in this file
@@ -449,7 +449,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
             semanticRecall: {
               topK: 1,
               messageRange: 1,
-              // scope: 'thread' // Default
+              scope: 'thread', // Explicitly set (default is now 'resource')
             },
           },
         });
@@ -460,7 +460,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
         expect(threadScopeResult.messages[0].content).toBe('The sky is blue today');
         expect(threadScopeResult.messages[1].content).toBe('Yes, very clear skies');
 
-        // 2. Test resource scope
+        // 2. Test resource scope (explicitly set)
         const resourceScopeResult = await memory.rememberMessages({
           threadId: thread1.id, // Still need a threadId, but scope overrides
           resourceId,
@@ -494,6 +494,31 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
             (m, i) => i === 0 || m.createdAt >= resourceScopeResult.messages[i - 1].createdAt,
           ),
         ).toBe(true);
+
+        // 3. Test default scope (should be resource now)
+        const defaultScopeResult = await memory.rememberMessages({
+          threadId: thread1.id,
+          resourceId,
+          vectorMessageSearch: searchQuery,
+          config: {
+            lastMessages: 0,
+            semanticRecall: {
+              topK: 5,
+              messageRange: 2,
+              // No scope specified - should default to 'resource'
+            },
+          },
+        });
+
+        // Should behave like resource scope (find messages from both threads)
+        expect(defaultScopeResult.messages).toHaveLength(4);
+        expect(defaultScopeResult.messages.some(m => m.threadId === thread1.id)).toBe(true);
+        expect(defaultScopeResult.messages.some(m => m.threadId === thread2.id)).toBe(true);
+        const defaultContents = defaultScopeResult.messages.map(m => m.content);
+        expect(defaultContents).toContain('The sky is blue today');
+        expect(defaultContents).toContain('Yes, very clear skies');
+        expect(defaultContents).toContain('Oceans are vast and blue');
+        expect(defaultContents).toContain('Indeed, the deep blue sea');
       });
     });
 
@@ -567,12 +592,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
           role: 'assistant',
           type: 'text',
         });
-        const content2 = result.messages[1].content[0];
-        if (typeof content2 === 'object' && content2 !== null && 'type' in content2 && content2.type === 'text') {
-          expect(content2).toEqual(assistantPart);
-        } else {
-          expect(content2).toEqual('Goodbye');
-        }
+        expect(result.messages[1].content).toEqual(`Goodbye`);
       });
 
       it('should handle complex message content', async () => {
@@ -904,7 +924,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
 
         const chunkSize = Math.ceil(totalMessages / NUMBER_OF_WORKERS);
         const workerPromises = [];
-        console.log(`Using ${NUMBER_OF_WORKERS} generic Memory workers to process ${totalMessages} messages.`);
+        console.info(`Using ${NUMBER_OF_WORKERS} generic Memory workers to process ${totalMessages} messages.`);
         for (let i = 0; i < NUMBER_OF_WORKERS; i++) {
           const chunk = messagesForWorkers.slice(i * chunkSize, (i + 1) * chunkSize);
           if (chunk.length === 0) continue;
@@ -914,7 +934,7 @@ export function getResuableTests(memory: Memory, workerTestConfig?: WorkerTestCo
                 messages: chunk,
                 storageType: workerTestConfig.storageTypeForWorker,
                 storageConfig: workerTestConfig.storageConfigForWorker,
-                memoryOptions: workerTestConfig.memoryOptionsForWorker || { threads: { generateTitle: false } },
+                memoryOptions: workerTestConfig.memoryOptionsForWorker || { generateTitle: false },
                 vectorConfig: workerTestConfig.vectorConfigForWorker,
               },
             });

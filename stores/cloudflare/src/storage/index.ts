@@ -8,33 +8,24 @@ import {
   TABLE_MESSAGES,
   TABLE_THREADS,
   TABLE_WORKFLOW_SNAPSHOT,
-  TABLE_EVALS,
   TABLE_SCORERS,
-  TABLE_TRACES,
 } from '@mastra/core/storage';
 import type {
   TABLE_NAMES,
   StorageColumn,
   StorageGetMessagesArg,
-  EvalRow,
   WorkflowRuns,
   WorkflowRun,
-  StorageGetTracesArg as _StorageGetTracesArg,
-  StorageGetTracesPaginatedArg,
   PaginationInfo,
   StoragePagination,
-  PaginationArgs,
   StorageDomains,
   StorageResourceType,
 } from '@mastra/core/storage';
-import type { Trace } from '@mastra/core/telemetry';
-import type { WorkflowRunState } from '@mastra/core/workflows';
+import type { StepResult, WorkflowRunState } from '@mastra/core/workflows';
 import Cloudflare from 'cloudflare';
-import { LegacyEvalsStorageCloudflare } from './domains/legacy-evals';
 import { MemoryStorageCloudflare } from './domains/memory';
 import { StoreOperationsCloudflare } from './domains/operations';
 import { ScoresStorageCloudflare } from './domains/scores';
-import { TracesStorageCloudflare } from './domains/traces';
 import { WorkflowsStorageCloudflare } from './domains/workflows';
 import { isWorkersConfig } from './types';
 import type { CloudflareStoreConfig, RecordTypes } from './types';
@@ -57,14 +48,7 @@ export class CloudflareStore extends MastraStorage {
     }
 
     // Validate all required table bindings exist
-    const requiredTables = [
-      TABLE_THREADS,
-      TABLE_MESSAGES,
-      TABLE_WORKFLOW_SNAPSHOT,
-      TABLE_EVALS,
-      TABLE_SCORERS,
-      TABLE_TRACES,
-    ] as const;
+    const requiredTables = [TABLE_THREADS, TABLE_MESSAGES, TABLE_WORKFLOW_SNAPSHOT, TABLE_SCORERS] as const;
 
     for (const table of requiredTables) {
       if (!(table in config.bindings)) {
@@ -85,6 +69,14 @@ export class CloudflareStore extends MastraStorage {
     if (!config.apiToken?.trim()) {
       throw new Error('apiToken is required for REST API');
     }
+  }
+
+  public get supports() {
+    const supports = super.supports;
+    supports.getScoresBySpan = true;
+    supports.resourceWorkingMemory = true;
+    supports.selectByIncludeResourceScope = true;
+    return supports;
   }
 
   constructor(config: CloudflareStoreConfig) {
@@ -113,15 +105,7 @@ export class CloudflareStore extends MastraStorage {
         bindings: this.bindings,
       });
 
-      const legacyEvals = new LegacyEvalsStorageCloudflare({
-        operations,
-      });
-
       const workflows = new WorkflowsStorageCloudflare({
-        operations,
-      });
-
-      const traces = new TracesStorageCloudflare({
         operations,
       });
 
@@ -135,9 +119,7 @@ export class CloudflareStore extends MastraStorage {
 
       this.stores = {
         operations,
-        legacyEvals,
         workflows,
-        traces,
         memory,
         scores,
       };
@@ -240,9 +222,56 @@ export class CloudflareStore extends MastraStorage {
     return this.stores.memory.getMessages({ threadId, resourceId, selectBy, format });
   }
 
+  async updateWorkflowResults({
+    workflowName,
+    runId,
+    stepId,
+    result,
+    runtimeContext,
+  }: {
+    workflowName: string;
+    runId: string;
+    stepId: string;
+    result: StepResult<any, any, any, any>;
+    runtimeContext: Record<string, any>;
+  }): Promise<Record<string, StepResult<any, any, any, any>>> {
+    return this.stores.workflows.updateWorkflowResults({ workflowName, runId, stepId, result, runtimeContext });
+  }
+
+  async updateWorkflowState({
+    workflowName,
+    runId,
+    opts,
+  }: {
+    workflowName: string;
+    runId: string;
+    opts: {
+      status: string;
+      result?: StepResult<any, any, any, any>;
+      error?: string;
+      suspendedPaths?: Record<string, number[]>;
+      waitingPaths?: Record<string, number[]>;
+    };
+  }): Promise<WorkflowRunState | undefined> {
+    return this.stores.workflows.updateWorkflowState({ workflowName, runId, opts });
+  }
+
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format: 'v1' }): Promise<MastraMessageV1[]>;
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format?: 'v2' }): Promise<MastraMessageV2[]>;
+  async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    return this.stores.memory.getMessagesById({ messageIds, format });
+  }
+
   async persistWorkflowSnapshot(params: {
     workflowName: string;
     runId: string;
+    resourceId?: string;
     snapshot: WorkflowRunState;
   }): Promise<void> {
     return this.stores.workflows.persistWorkflowSnapshot(params);
@@ -254,44 +283,6 @@ export class CloudflareStore extends MastraStorage {
 
   async batchInsert<T extends TABLE_NAMES>(input: { tableName: T; records: Partial<RecordTypes[T]>[] }): Promise<void> {
     return this.stores.operations.batchInsert(input);
-  }
-
-  async getTraces({
-    name,
-    scope,
-    page = 0,
-    perPage = 100,
-    attributes,
-    fromDate,
-    toDate,
-  }: {
-    name?: string;
-    scope?: string;
-    page: number;
-    perPage: number;
-    attributes?: Record<string, string>;
-    fromDate?: Date;
-    toDate?: Date;
-  }): Promise<any[]> {
-    return this.stores.traces.getTraces({
-      name,
-      scope,
-      page,
-      perPage,
-      attributes,
-      fromDate,
-      toDate,
-    });
-  }
-
-  async getEvalsByAgentName(agentName: string, type?: 'test' | 'live'): Promise<EvalRow[]> {
-    return this.stores.legacyEvals.getEvalsByAgentName(agentName, type);
-  }
-
-  async getEvals(
-    options: { agentName?: string; type?: 'test' | 'live'; dateRange?: { start?: Date; end?: Date } } & PaginationArgs,
-  ): Promise<PaginationInfo & { evals: EvalRow[] }> {
-    return this.stores.legacyEvals.getEvals(options);
   }
 
   async getWorkflowRuns({
@@ -327,10 +318,6 @@ export class CloudflareStore extends MastraStorage {
     workflowName: string;
   }): Promise<WorkflowRun | null> {
     return this.stores.workflows.getWorkflowRunById({ runId, workflowName });
-  }
-
-  async getTracesPaginated(args: StorageGetTracesPaginatedArg): Promise<PaginationInfo & { traces: Trace[] }> {
-    return this.stores.traces.getTracesPaginated(args);
   }
 
   async getThreadsByResourceIdPaginated(args: {
@@ -401,6 +388,18 @@ export class CloudflareStore extends MastraStorage {
     pagination: StoragePagination;
   }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
     return this.stores.scores.getScoresByScorerId({ scorerId, entityId, entityType, source, pagination });
+  }
+
+  async getScoresBySpan({
+    traceId,
+    spanId,
+    pagination,
+  }: {
+    traceId: string;
+    spanId: string;
+    pagination: StoragePagination;
+  }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
+    return this.stores.scores.getScoresBySpan({ traceId, spanId, pagination });
   }
 
   async getResourceById({ resourceId }: { resourceId: string }): Promise<StorageResourceType | null> {

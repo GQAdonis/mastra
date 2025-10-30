@@ -1,373 +1,61 @@
 import type { IMastraLogger } from '@mastra/core/logger';
 import * as babel from '@babel/core';
-import commonjs from '@rollup/plugin-commonjs';
-import json from '@rollup/plugin-json';
-import nodeResolve from '@rollup/plugin-node-resolve';
-import virtual from '@rollup/plugin-virtual';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { isAbsolute } from 'node:path';
-import { rollup, type OutputAsset, type OutputChunk, type Plugin } from 'rollup';
-import esbuild from 'rollup-plugin-esbuild';
-import { isNodeBuiltin } from './isNodeBuiltin';
-import { aliasHono } from './plugins/hono-alias';
-import { removeDeployer } from './plugins/remove-deployer';
-import { dirname, join } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import type { OutputAsset, OutputChunk } from 'rollup';
+import { join } from 'node:path';
 import { validate } from '../validator/validate';
-import { tsConfigPaths } from './plugins/tsconfig-paths';
-import { writeFile } from 'node:fs/promises';
 import { getBundlerOptions } from './bundlerOptions';
-import resolveFrom from 'resolve-from';
-import { packageDirectory } from 'package-directory';
 import { checkConfigExport } from './babel/check-config-export';
+import { getWorkspaceInformation, type WorkspacePackageInfo } from '../bundler/workspaceDependencies';
+import type { DependencyMetadata } from './types';
+import { analyzeEntry } from './analyze/analyzeEntry';
+import { bundleExternals } from './analyze/bundleExternals';
+import { getPackageInfo } from 'local-pkg';
+import { ErrorCategory, ErrorDomain, MastraError } from '@mastra/core/error';
+import { findNativePackageModule } from './utils';
 
-// TODO: Make thie extendable or find a rollup plugin that can do this
-const globalExternals = [
-  'pino',
-  'pino-pretty',
-  '@libsql/client',
-  'pg',
-  'libsql',
-  'jsdom',
-  'sqlite3',
-  'fastembed',
-  'nodemailer',
-  '#tools',
-];
+type ErrorId = 'DEPLOYER_ANALYZE_MODULE_NOT_FOUND' | 'DEPLOYER_ANALYZE_MISSING_NATIVE_BUILD';
 
-function findExternalImporter(module: OutputChunk, external: string, allOutputs: OutputChunk[]): OutputChunk | null {
-  const capturedFiles = new Set();
+function throwExternalDependencyError({
+  errorId,
+  moduleName,
+  packageName,
+  messagePrefix,
+}: {
+  errorId: ErrorId;
+  moduleName: string;
+  packageName: string;
+  messagePrefix: string;
+}): never {
+  throw new MastraError({
+    id: errorId,
+    domain: ErrorDomain.DEPLOYER,
+    category: ErrorCategory.USER,
+    details: {
+      importFile: moduleName,
+      packageName: packageName,
+    },
+    text: `${messagePrefix} \`${packageName}\` to your externals.
 
-  for (const id of module.imports) {
-    if (id === external) {
-      return module;
-    } else {
-      if (id.endsWith('.mjs')) {
-        capturedFiles.add(id);
-      }
-    }
+export const mastra = new Mastra({
+  bundler: {
+    externals: ["${packageName}"],
   }
-
-  for (const file of capturedFiles) {
-    const nextModule = allOutputs.find(o => o.fileName === file);
-    if (nextModule) {
-      const importer = findExternalImporter(nextModule, external, allOutputs);
-
-      if (importer) {
-        return importer;
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Check if a path is relative without relying on `isAbsolute()` as we want to allow package names (e.g. `@pkg/name`)
- */
-function isRelativePath(id: string): boolean {
-  return id === '.' || id === '..' || id.startsWith('./') || id.startsWith('../');
-}
-
-/**
- * Analyzes the entry file to identify dependencies that need optimization.
- * This is the first step of the bundle analysis process.
- *
- * @param entry - The entry file path or content
- * @param mastraEntry - The mastra entry point
- * @param isVirtualFile - Whether the entry is a virtual file (content string) or a file path
- * @param platform - Target platform (node or browser)
- * @param logger - Logger instance for debugging
- * @returns Map of dependencies to optimize with their exported bindings
- */
-async function analyze(
-  entry: string,
-  mastraEntry: string,
-  isVirtualFile: boolean,
-  platform: 'node' | 'browser',
-  logger: IMastraLogger,
-  sourcemapEnabled: boolean = false,
-) {
-  logger.info('Analyzing dependencies...');
-  let virtualPlugin = null;
-  if (isVirtualFile) {
-    virtualPlugin = virtual({
-      '#entry': entry,
-    });
-    entry = '#entry';
-  }
-
-  const normalizedMastraEntry = mastraEntry.replaceAll('\\', '/');
-  const optimizerBundler = await rollup({
-    logLevel: process.env.MASTRA_BUNDLER_DEBUG === 'true' ? 'debug' : 'silent',
-    input: isVirtualFile ? '#entry' : entry,
-    treeshake: 'smallest',
-    preserveSymlinks: true,
-    plugins: [
-      virtualPlugin,
-      tsConfigPaths(),
-      {
-        name: 'custom-alias-resolver',
-        resolveId(id: string) {
-          if (id === '#server') {
-            return fileURLToPath(import.meta.resolve('@mastra/deployer/server')).replaceAll('\\', '/');
-          }
-          if (id === '#mastra') {
-            return normalizedMastraEntry;
-          }
-          if (id.startsWith('@mastra/server')) {
-            return fileURLToPath(import.meta.resolve(id));
-          }
-
-          // Tools is generated dependency, we don't want it to be handled by the bundler but instead read from disk at runtime
-          if (id === '#tools') {
-            return {
-              id: '#tools',
-              external: true,
-            };
-          }
-        },
-      } satisfies Plugin,
-      json(),
-      esbuild({
-        target: 'node20',
-        platform,
-        minify: false,
-      }),
-      commonjs({
-        strictRequires: 'debug',
-        ignoreTryCatch: false,
-        transformMixedEsModules: true,
-        extensions: ['.js', '.ts'],
-      }),
-      removeDeployer(normalizedMastraEntry, { sourcemap: sourcemapEnabled }),
-      esbuild({
-        target: 'node20',
-        platform,
-        minify: false,
-      }),
-    ].filter(Boolean),
+})`,
   });
-
-  const { output } = await optimizerBundler.generate({
-    format: 'esm',
-    inlineDynamicImports: true,
-  });
-
-  await optimizerBundler.close();
-
-  const depsToOptimize = new Map(Object.entries(output[0].importedBindings));
-  for (const dep of depsToOptimize.keys()) {
-    if (isNodeBuiltin(dep)) {
-      depsToOptimize.delete(dep);
-    }
-  }
-
-  for (const o of output) {
-    if (o.type !== 'chunk') {
-      continue;
-    }
-
-    // Tools is generated dependency, we don't want our analyzer to handle it
-    const dynamicImports = o.dynamicImports.filter(d => d !== '#tools');
-    if (!dynamicImports.length) {
-      continue;
-    }
-
-    for (const dynamicImport of dynamicImports) {
-      if (!depsToOptimize.has(dynamicImport) && !isNodeBuiltin(dynamicImport)) {
-        depsToOptimize.set(dynamicImport, ['*']);
-      }
-    }
-  }
-
-  return depsToOptimize;
-}
-
-/**
- * Bundles vendor dependencies identified in the analysis step.
- * Creates virtual modules for each dependency and bundles them using rollup.
- *
- * @param depsToOptimize - Map of dependencies with their exports from analyze step
- * @param outputDir - Directory where bundled files will be written
- * @param logger - Logger instance for debugging
- * @returns Object containing bundle output and reference map for validation
- */
-export async function bundleExternals(
-  depsToOptimize: Map<string, string[]>,
-  outputDir: string,
-  logger: IMastraLogger,
-  options?: {
-    externals?: string[];
-    transpilePackages?: string[];
-    isDev?: boolean;
-  },
-) {
-  logger.info('Optimizing dependencies...');
-  logger.debug(
-    `${Array.from(depsToOptimize.keys())
-      .map(key => `- ${key}`)
-      .join('\n')}`,
-  );
-
-  const { externals: customExternals = [], transpilePackages = [] } = options || {};
-  const allExternals = [...globalExternals, ...customExternals];
-  const reverseVirtualReferenceMap = new Map<string, string>();
-  const virtualDependencies = new Map();
-  for (const [dep, exports] of depsToOptimize.entries()) {
-    const name = dep.replaceAll('/', '-');
-    reverseVirtualReferenceMap.set(name, dep);
-
-    const virtualFile: string[] = [];
-    let exportStringBuilder = [];
-    for (const local of exports) {
-      if (local === '*') {
-        virtualFile.push(`export * from '${dep}';`);
-      } else if (local === 'default') {
-        virtualFile.push(`export { default } from '${dep}';`);
-      } else {
-        exportStringBuilder.push(local);
-      }
-    }
-
-    if (exportStringBuilder.length > 0) {
-      virtualFile.push(`export { ${exportStringBuilder.join(', ')} } from '${dep}';`);
-    }
-
-    virtualDependencies.set(dep, {
-      name,
-      virtual: virtualFile.join('\n'),
-    });
-  }
-
-  const transpilePackagesMap = new Map<string, string>();
-  for (const pkg of transpilePackages) {
-    const entryPoint = dirname(resolveFrom(outputDir, pkg));
-    const dir = await packageDirectory({
-      cwd: entryPoint,
-    });
-    if (dir) {
-      transpilePackagesMap.set(pkg, dir);
-    }
-  }
-
-  const bundler = await rollup({
-    logLevel: process.env.MASTRA_BUNDLER_DEBUG === 'true' ? 'debug' : 'silent',
-    input: Array.from(virtualDependencies.entries()).reduce(
-      (acc, [dep, virtualDep]) => {
-        acc[virtualDep.name] = `#virtual-${dep}`;
-        return acc;
-      },
-      {} as Record<string, string>,
-    ),
-    // this dependency breaks the build, so we need to exclude it
-    // TODO actually fix this so we don't need to exclude it
-    external: allExternals,
-    treeshake: 'smallest',
-    plugins: [
-      virtual(
-        Array.from(virtualDependencies.entries()).reduce(
-          (acc, [dep, virtualDep]) => {
-            acc[`#virtual-${dep}`] = virtualDep.virtual;
-            return acc;
-          },
-          {} as Record<string, string>,
-        ),
-      ),
-      options?.isDev
-        ? {
-            name: 'external-resolver',
-            resolveId(id: string, importer: string | undefined) {
-              const pathsToTranspile = [...transpilePackagesMap.values()];
-              if (importer && pathsToTranspile.some(p => importer?.startsWith(p)) && !isRelativePath(id)) {
-                return {
-                  id: resolveFrom(importer, id),
-                  external: true,
-                };
-              }
-
-              return null;
-            },
-          }
-        : null,
-      transpilePackagesMap.size
-        ? esbuild({
-            target: 'node20',
-            platform: 'node',
-            format: 'esm',
-            minify: false,
-            include: [...transpilePackagesMap.values()].map(p => {
-              // Match files from transpilePackages but exclude any nested node_modules
-              // Escapes regex special characters in the path and uses negative lookahead to avoid node_modules
-              // generated by cursor
-              return new RegExp(`^${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(?!.*node_modules).*$`);
-            }),
-          })
-        : null,
-      commonjs({
-        strictRequires: 'strict',
-        transformMixedEsModules: true,
-        ignoreTryCatch: false,
-      }),
-      nodeResolve({
-        preferBuiltins: true,
-        exportConditions: ['node'],
-      }),
-      // hono is imported from deployer, so we need to resolve from here instead of the project root
-      aliasHono(),
-      json(),
-    ].filter(Boolean),
-  });
-
-  const { output } = await bundler.write({
-    format: 'esm',
-    dir: outputDir,
-    entryFileNames: '[name].mjs',
-    chunkFileNames: '[name].mjs',
-    hoistTransitiveImports: false,
-  });
-  const moduleResolveMap = {} as Record<string, Record<string, string>>;
-  const filteredChunks = output.filter(o => o.type === 'chunk');
-
-  for (const o of filteredChunks.filter(o => o.isEntry || o.isDynamicEntry)) {
-    for (const external of allExternals) {
-      if (external === '#tools') {
-        continue;
-      }
-
-      const importer = findExternalImporter(o, external, filteredChunks);
-
-      if (importer) {
-        const fullPath = join(outputDir, importer.fileName);
-        moduleResolveMap[fullPath] = moduleResolveMap[fullPath] || {};
-        if (importer.moduleIds.length) {
-          moduleResolveMap[fullPath][external] = importer.moduleIds[importer.moduleIds.length - 1]?.startsWith(
-            '\x00virtual:#virtual',
-          )
-            ? importer.moduleIds[importer.moduleIds.length - 2]!
-            : importer.moduleIds[importer.moduleIds.length - 1]!;
-        }
-      }
-    }
-  }
-
-  await writeFile(join(outputDir, 'module-resolve-map.json'), JSON.stringify(moduleResolveMap, null, 2));
-
-  await bundler.close();
-
-  return { output, reverseVirtualReferenceMap, usedExternals: moduleResolveMap };
 }
 
 /**
  * Validates the bundled output by attempting to import each generated module.
- * Tracks invalid chunks and external dependencies that couldn't be bundled.
+ * Tracks external dependencies that couldn't be bundled.
  *
  * @param output - Bundle output from rollup
  * @param reverseVirtualReferenceMap - Map to resolve virtual module names back to original deps
  * @param outputDir - Directory containing the bundled files
  * @param logger - Logger instance for debugging
- * @returns Analysis result containing invalid chunks and dependency mappings
+ * @param workspaceMap - Map of workspace packages that gets directly passed through for later consumption
+ * @returns Analysis result containing dependency mappings
  */
 async function validateOutput(
   {
@@ -375,19 +63,26 @@ async function validateOutput(
     reverseVirtualReferenceMap,
     usedExternals,
     outputDir,
+    projectRoot,
+    workspaceMap,
   }: {
     output: (OutputChunk | OutputAsset)[];
     reverseVirtualReferenceMap: Map<string, string>;
     usedExternals: Record<string, Record<string, string>>;
     outputDir: string;
+    projectRoot: string;
+    workspaceMap: Map<string, WorkspacePackageInfo>;
   },
   logger: IMastraLogger,
 ) {
   const result = {
-    invalidChunks: new Set<string>(),
     dependencies: new Map<string, string>(),
     externalDependencies: new Set<string>(),
+    workspaceMap,
   };
+
+  // store resolve map for validation
+  await writeFile(join(outputDir, 'module-resolve-map.json'), JSON.stringify(usedExternals, null, 2));
 
   // we should resolve the version of the deps
   for (const deps of Object.values(usedExternals)) {
@@ -409,29 +104,53 @@ async function validateOutput(
 
       if (!file.isDynamicEntry && file.isEntry) {
         // validate if the chunk is actually valid, a failsafe to make sure bundling didn't make any mistakes
-        await validate(join(outputDir, file.fileName));
+        await validate(join(projectRoot, file.fileName));
       }
     } catch (err) {
-      result.invalidChunks.add(file.fileName);
-      if (file.isEntry && reverseVirtualReferenceMap.has(file.name)) {
-        const reference = reverseVirtualReferenceMap.get(file.name)!;
-        const dep = reference.startsWith('@') ? reference.split('/').slice(0, 2).join('/') : reference.split('/')[0];
+      if (err instanceof Error) {
+        let moduleName: string | undefined | null = null;
+        let errorConfig: {
+          id: ErrorId;
+          messagePrefix: string;
+        } | null = null;
 
-        result.externalDependencies.add(dep!);
+        if (err.message.includes('[ERR_MODULE_NOT_FOUND]')) {
+          // This is the preferred way to get the module name that caused the issue
+          const moduleIdName = file.moduleIds.length >= 2 ? file.moduleIds[file.moduleIds.length - 2] : undefined;
+          // For some reason some virtual modules are quite sparse on their details, so name (e.g. '.mastra/.build/puppeteer') is a good enough fallback
+          const fallbackName = file.name.split('/').pop();
+
+          moduleName = moduleIdName ?? fallbackName;
+          errorConfig = {
+            id: 'DEPLOYER_ANALYZE_MODULE_NOT_FOUND',
+            messagePrefix: "Mastra wasn't able to build your project. Please add",
+          };
+        } else if (err.message.includes('Error: No native build was found for ')) {
+          moduleName = findNativePackageModule(file.moduleIds);
+          errorConfig = {
+            id: 'DEPLOYER_ANALYZE_MISSING_NATIVE_BUILD',
+            messagePrefix: 'We found a binary dependency in your bundle. Please add',
+          };
+        }
+
+        if (moduleName && errorConfig) {
+          const pkgInfo = await getPackageInfo(moduleName);
+          const packageName = pkgInfo?.packageJson?.name;
+
+          if (packageName) {
+            throwExternalDependencyError({
+              errorId: errorConfig.id,
+              moduleName,
+              packageName,
+              messagePrefix: errorConfig.messagePrefix,
+            });
+          } else {
+            logger.debug(`Could not determine the module name for file ${file.fileName}`);
+          }
+        }
+
+        logger.debug(`Error while validating module ${file.fileName}: ${err.message}`);
       }
-
-      // we might need this on other projects but not sure so let's keep it commented out for now
-      // console.log(file.fileName, file.isEntry, file.isDynamicEntry, err);
-      // result.invalidChunks.add(file.fileName);
-      // const externalImports = excludeInternalDeps(file.imports.filter(file => !internalFiles.has(file)));
-      // externalImports.push(...excludeInternalDeps(file.dynamicImports.filter(file => !internalFiles.has(file))));
-      // for (const externalImport of externalImports) {
-      //   result.externalDependencies.add(externalImport);
-      // }
-
-      // if (reverseVirtualReferenceMap.has(file.name)) {
-      //   result.externalDependencies.add(reverseVirtualReferenceMap.get(file.name)!);
-      // }
     }
   }
 
@@ -449,10 +168,21 @@ async function validateOutput(
 export async function analyzeBundle(
   entries: string[],
   mastraEntry: string,
-  outputDir: string,
-  platform: 'node' | 'browser',
+  {
+    outputDir,
+    projectRoot,
+    isDev = false,
+    bundlerOptions: _bundlerOptions,
+  }: {
+    outputDir: string;
+    projectRoot: string;
+    platform: 'node' | 'browser';
+    isDev?: boolean;
+    bundlerOptions?: {
+      enableEsmShim?: boolean;
+    } | null;
+  },
   logger: IMastraLogger,
-  sourcemapEnabled: boolean = false,
 ) {
   const mastraConfig = await readFile(mastraEntry, 'utf-8');
   const mastraConfigResult = {
@@ -474,30 +204,84 @@ export const mastra = new Mastra({
 If you think your configuration is valid, please open an issue.`);
   }
 
-  const depsToOptimize = new Map<string, string[]>();
+  const { enableEsmShim = true } = _bundlerOptions || {};
+  const bundlerOptions = await getBundlerOptions(mastraEntry, outputDir);
+  const { workspaceMap, workspaceRoot } = await getWorkspaceInformation({ mastraEntryFile: mastraEntry });
+
+  let index = 0;
+  const depsToOptimize = new Map<string, DependencyMetadata>();
+
+  logger.info('Analyzing dependencies...');
+
   for (const entry of entries) {
     const isVirtualFile = entry.includes('\n') || !existsSync(entry);
-    const analyzeResult = await analyze(entry, mastraEntry, isVirtualFile, platform, logger, sourcemapEnabled);
+    const analyzeResult = await analyzeEntry({ entry, isVirtualFile }, mastraEntry, {
+      logger,
+      sourcemapEnabled: bundlerOptions?.sourcemap ?? false,
+      workspaceMap,
+      projectRoot,
+    });
 
-    for (const [dep, exports] of analyzeResult.entries()) {
+    // Write the entry file to the output dir so that we can use it for workspace resolution stuff
+    await writeFile(join(outputDir, `entry-${index++}.mjs`), analyzeResult.output.code);
+
+    // Merge dependencies from each entry (main, tools, etc.)
+    for (const [dep, metadata] of analyzeResult.dependencies.entries()) {
       if (depsToOptimize.has(dep)) {
         // Merge with existing exports if dependency already exists
-        const existingExports = depsToOptimize.get(dep)!;
-        depsToOptimize.set(dep, [...new Set([...existingExports, ...exports])]);
+        const existingEntry = depsToOptimize.get(dep)!;
+        depsToOptimize.set(dep, {
+          ...existingEntry,
+          exports: [...new Set([...existingEntry.exports, ...metadata.exports])],
+        });
       } else {
-        depsToOptimize.set(dep, exports);
+        depsToOptimize.set(dep, metadata);
       }
     }
   }
-  const bundlerOptions = await getBundlerOptions(mastraEntry, outputDir);
 
-  const { output, reverseVirtualReferenceMap, usedExternals } = await bundleExternals(
-    depsToOptimize,
-    outputDir,
-    logger,
-    bundlerOptions ?? undefined,
+  /**
+   * Only during `mastra dev` we want to optimize workspace packages. In previous steps we might have added dependencies that are not workspace packages, so we gotta remove them again.
+   */
+  if (isDev) {
+    for (const [dep, metadata] of depsToOptimize.entries()) {
+      if (!metadata.isWorkspace) {
+        depsToOptimize.delete(dep);
+      }
+    }
+  }
+
+  logger.debug(`Analyzed dependencies: ${Array.from(depsToOptimize.keys()).join(', ')}`);
+
+  logger.info('Optimizing dependencies...');
+  logger.debug(
+    `${Array.from(depsToOptimize.keys())
+      .map(key => `- ${key}`)
+      .join('\n')}`,
   );
-  const result = await validateOutput({ output, reverseVirtualReferenceMap, usedExternals, outputDir }, logger);
+
+  const { output, fileNameToDependencyMap, usedExternals } = await bundleExternals(depsToOptimize, outputDir, {
+    bundlerOptions: {
+      ...bundlerOptions,
+      enableEsmShim,
+      isDev,
+    },
+    projectRoot,
+    workspaceRoot,
+    workspaceMap,
+  });
+
+  const result = await validateOutput(
+    {
+      output,
+      reverseVirtualReferenceMap: fileNameToDependencyMap,
+      usedExternals,
+      outputDir,
+      projectRoot: workspaceRoot || projectRoot,
+      workspaceMap,
+    },
+    logger,
+  );
 
   return result;
 }

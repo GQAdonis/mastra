@@ -14,10 +14,26 @@ import type {
   PaginationInfo,
   StorageResourceType,
   ThreadSortOptions,
+  StorageListMessagesInput,
+  StorageListMessagesOutput,
+  StorageListThreadsByResourceIdInput,
+  StorageListThreadsByResourceIdOutput,
 } from '@mastra/core/storage';
 import type { IDatabase } from 'pg-promise';
 import type { StoreOperationsPG } from '../operations';
 import { getTableName, getSchemaName } from '../utils';
+
+// Database row type that includes timezone-aware columns
+type MessageRowFromDB = {
+  id: string;
+  content: string | any;
+  role: string;
+  type?: string;
+  createdAt: Date | string;
+  createdAtZ?: Date | string;
+  threadId: string;
+  resourceId: string;
+};
 
 export class MemoryPG extends MemoryStorage {
   private client: IDatabase<{}>;
@@ -37,6 +53,21 @@ export class MemoryPG extends MemoryStorage {
     this.client = client;
     this.schema = schema;
     this.operations = operations;
+  }
+
+  /**
+   * Normalizes message row from database by applying createdAtZ fallback
+   */
+  private normalizeMessageRow(row: MessageRowFromDB): Omit<MessageRowFromDB, 'createdAtZ'> {
+    return {
+      id: row.id,
+      content: row.content,
+      role: row.role,
+      type: row.type,
+      createdAt: row.createdAtZ || row.createdAt,
+      threadId: row.threadId,
+      resourceId: row.resourceId,
+    };
   }
 
   async getThreadById({ threadId }: { threadId: string }): Promise<StorageThreadType | null> {
@@ -323,6 +354,8 @@ export class MemoryPG extends MemoryStorage {
     selectBy: StorageGetMessagesArg['selectBy'];
     orderByStatement: string;
   }) {
+    if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
     const include = selectBy?.include;
     if (!include) return null;
 
@@ -346,11 +379,12 @@ export class MemoryPG extends MemoryStorage {
                 WHERE thread_id = $${paramIdx}
               )
               SELECT
-                m.id, 
-                m.content, 
-                m.role, 
+                m.id,
+                m.content,
+                m.role,
                 m.type,
-                m."createdAt", 
+                m."createdAt",
+                m."createdAtZ",
                 m.thread_id AS "threadId",
                 m."resourceId"
               FROM ordered_messages m
@@ -383,6 +417,25 @@ export class MemoryPG extends MemoryStorage {
     return dedupedRows;
   }
 
+  private parseRow(row: MessageRowFromDB): MastraMessageV2 {
+    const normalized = this.normalizeMessageRow(row);
+    let content = normalized.content;
+    try {
+      content = JSON.parse(normalized.content);
+    } catch {
+      // use content as is if it's not JSON
+    }
+    return {
+      id: normalized.id,
+      content,
+      role: normalized.role as MastraMessageV2['role'],
+      createdAt: new Date(normalized.createdAt as string),
+      threadId: normalized.threadId,
+      resourceId: normalized.resourceId,
+      ...(normalized.type && normalized.type !== 'v2' ? { type: normalized.type } : {}),
+    } satisfies MastraMessageV2;
+  }
+
   /**
    * @deprecated use getMessagesPaginated instead
    */
@@ -393,13 +446,14 @@ export class MemoryPG extends MemoryStorage {
       format?: 'v1' | 'v2';
     },
   ): Promise<MastraMessageV1[] | MastraMessageV2[]> {
-    const { threadId, format, selectBy } = args;
-
-    const selectStatement = `SELECT id, content, role, type, "createdAt", thread_id AS "threadId", "resourceId"`;
+    const { threadId, resourceId, format, selectBy } = args;
+    const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
     const orderByStatement = `ORDER BY "createdAt" DESC`;
     const limit = resolveMessageLimit({ last: selectBy?.last, defaultLimit: 40 });
 
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       let rows: any[] = [];
       const include = selectBy?.include || [];
 
@@ -422,7 +476,8 @@ export class MemoryPG extends MemoryStorage {
       const remainingRows = await this.client.manyOrNone(query, queryParams);
       rows.push(...remainingRows);
 
-      const fetchedMessages = (rows || []).map(message => {
+      const fetchedMessages = (rows || []).map((row: MessageRowFromDB) => {
+        const message = this.normalizeMessageRow(row);
         if (typeof message.content === 'string') {
           try {
             message.content = JSON.parse(message.content);
@@ -453,6 +508,7 @@ export class MemoryPG extends MemoryStorage {
           category: ErrorCategory.THIRD_PARTY,
           details: {
             threadId,
+            resourceId: resourceId ?? '',
           },
         },
         error,
@@ -463,29 +519,109 @@ export class MemoryPG extends MemoryStorage {
     }
   }
 
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format: 'v1';
+  }): Promise<MastraMessageV1[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v2';
+  }): Promise<MastraMessageV2[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    if (messageIds.length === 0) return [];
+    const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
+
+    try {
+      const tableName = getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.schema) });
+      const query = `
+        ${selectStatement} FROM ${tableName} 
+        WHERE id IN (${messageIds.map((_, i) => `$${i + 1}`).join(', ')})
+        ORDER BY "createdAt" DESC
+      `;
+      const resultRows = await this.client.manyOrNone(query, messageIds);
+
+      const list = new MessageList().add(
+        resultRows.map(row => this.parseRow(row)),
+        'memory',
+      );
+      if (format === `v1`) return list.get.all.v1();
+      return list.get.all.v2();
+    } catch (error) {
+      const mastraError = new MastraError(
+        {
+          id: 'MASTRA_STORAGE_PG_STORE_GET_MESSAGES_BY_ID_FAILED',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: {
+            messageIds: JSON.stringify(messageIds),
+          },
+        },
+        error,
+      );
+      this.logger?.error?.(mastraError.toString());
+      this.logger?.trackException(mastraError);
+      return [];
+    }
+  }
+
+  public async listMessages(_args: StorageListMessagesInput): Promise<StorageListMessagesOutput> {
+    throw new Error(
+      `listMessages is not yet implemented by this storage adapter (${this.constructor.name}). ` +
+        `This method is currently being rolled out across all storage adapters. ` +
+        `Please use getMessages or getMessagesPaginated as an alternative, or wait for the implementation.`,
+    );
+  }
+
+  public async listMessagesById({ messageIds }: { messageIds: string[] }): Promise<MastraMessageV2[]> {
+    return this.getMessagesById({ messageIds, format: 'v2' });
+  }
+
+  public async listThreadsByResourceId(
+    args: StorageListThreadsByResourceIdInput,
+  ): Promise<StorageListThreadsByResourceIdOutput> {
+    const { resourceId, limit, offset, orderBy, sortDirection } = args;
+    const page = Math.floor(offset / limit);
+    const perPage = limit;
+    return this.getThreadsByResourceIdPaginated({ resourceId, page, perPage, orderBy, sortDirection });
+  }
+
   public async getMessagesPaginated(
     args: StorageGetMessagesArg & {
       format?: 'v1' | 'v2';
     },
   ): Promise<PaginationInfo & { messages: MastraMessageV1[] | MastraMessageV2[] }> {
-    const { threadId, format, selectBy } = args;
+    const { threadId, resourceId, format, selectBy } = args;
     const { page = 0, perPage: perPageInput, dateRange } = selectBy?.pagination || {};
     const fromDate = dateRange?.start;
     const toDate = dateRange?.end;
 
-    const selectStatement = `SELECT id, content, role, type, "createdAt", thread_id AS "threadId", "resourceId"`;
+    const selectStatement = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId"`;
     const orderByStatement = `ORDER BY "createdAt" DESC`;
 
-    const messages: MastraMessageV2[] = [];
-
-    if (selectBy?.include?.length) {
-      const includeMessages = await this._getIncludedMessages({ threadId, selectBy, orderByStatement });
-      if (includeMessages) {
-        messages.push(...includeMessages);
-      }
-    }
+    const messages: MessageRowFromDB[] = [];
 
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
+      if (selectBy?.include?.length) {
+        const includeMessages = await this._getIncludedMessages({ threadId, selectBy, orderByStatement });
+        if (includeMessages) {
+          messages.push(...includeMessages);
+        }
+      }
+
       const perPage =
         perPageInput !== undefined ? perPageInput : resolveMessageLimit({ last: selectBy?.last, defaultLimit: 40 });
       const currentOffset = page * perPage;
@@ -528,16 +664,17 @@ export class MemoryPG extends MemoryStorage {
       messages.push(...(rows || []));
 
       // Parse content back to objects if they were stringified during storage
-      const messagesWithParsedContent = messages.map(message => {
+      const messagesWithParsedContent: MastraMessageV2[] = messages.map((row: MessageRowFromDB) => {
+        const message = this.normalizeMessageRow(row);
         if (typeof message.content === 'string') {
           try {
-            return { ...message, content: JSON.parse(message.content) };
+            return { ...message, content: JSON.parse(message.content) } as MastraMessageV2;
           } catch {
             // If parsing fails, leave as string (V1 message)
-            return message;
+            return message as MastraMessageV2;
           }
         }
-        return message;
+        return message as MastraMessageV2;
       });
 
       const list = new MessageList().add(messagesWithParsedContent, 'memory');
@@ -558,6 +695,7 @@ export class MemoryPG extends MemoryStorage {
           category: ErrorCategory.THIRD_PARTY,
           details: {
             threadId,
+            resourceId: resourceId ?? '',
             page,
           },
         },
@@ -702,7 +840,7 @@ export class MemoryPG extends MemoryStorage {
 
     const messageIds = messages.map(m => m.id);
 
-    const selectQuery = `SELECT id, content, role, type, "createdAt", thread_id AS "threadId", "resourceId" FROM ${getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.schema) })} WHERE id IN ($1:list)`;
+    const selectQuery = `SELECT id, content, role, type, "createdAt", "createdAtZ", thread_id AS "threadId", "resourceId" FROM ${getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.schema) })} WHERE id IN ($1:list)`;
 
     const existingMessagesDb = await this.client.manyOrNone(selectQuery, [messageIds]);
 
@@ -798,17 +936,18 @@ export class MemoryPG extends MemoryStorage {
     });
 
     // Re-fetch to return the fully updated messages
-    const updatedMessages = await this.client.manyOrNone<MastraMessageV2>(selectQuery, [messageIds]);
+    const updatedMessages = await this.client.manyOrNone<MessageRowFromDB>(selectQuery, [messageIds]);
 
-    return (updatedMessages || []).map(message => {
+    return (updatedMessages || []).map((row: MessageRowFromDB) => {
+      const message = this.normalizeMessageRow(row);
       if (typeof message.content === 'string') {
         try {
-          message.content = JSON.parse(message.content);
+          return { ...message, content: JSON.parse(message.content) } as MastraMessageV2;
         } catch {
           /* ignore */
         }
       }
-      return message;
+      return message as MastraMessageV2;
     });
   }
 

@@ -1,27 +1,59 @@
-import type { ObjectStreamPart, StreamObjectResult, TextStreamPart } from 'ai';
 import type { MastraMessageV2, MessageList } from '../agent/message-list';
 import { TripWire } from '../agent/trip-wire';
-import type { StreamTextResult } from '../llm';
+import { AISpanType } from '../ai-tracing';
+import type { AISpan, TracingContext } from '../ai-tracing';
 import type { IMastraLogger } from '../logger';
+import type { ChunkType, OutputSchema } from '../stream';
+import type { MastraModelOutput } from '../stream/base/output';
 import type { Processor } from './index';
 
 /**
  * Implementation of processor state management
  */
-class ProcessorState {
+export class ProcessorState<OUTPUT extends OutputSchema = undefined> {
   private accumulatedText = '';
   public customState: Record<string, any> = {};
-  public streamParts: (TextStreamPart<any> | ObjectStreamPart<any>)[] = [];
+  public streamParts: ChunkType<OUTPUT>[] = [];
+  public span?: AISpan<AISpanType.PROCESSOR_RUN>;
 
-  constructor(private readonly processorName: string) {}
+  constructor(options: { processorName: string; tracingContext?: TracingContext; processorIndex?: number }) {
+    const { processorName, tracingContext, processorIndex } = options;
+    const currentSpan = tracingContext?.currentSpan;
+
+    // Find the AGENT_RUN span by walking up the parent chain
+    const parentSpan = currentSpan?.findParent(AISpanType.AGENT_RUN) || currentSpan?.parent || currentSpan;
+    this.span = parentSpan?.createChildSpan({
+      type: AISpanType.PROCESSOR_RUN,
+      name: `output processor: ${processorName}`,
+      attributes: {
+        processorName: processorName,
+        processorType: 'output',
+        processorIndex: processorIndex ?? 0,
+      },
+      input: {
+        streamParts: [],
+        state: {},
+        totalChunks: 0,
+      },
+    });
+  }
 
   // Internal methods for the runner
-  addPart(part: TextStreamPart<any> | ObjectStreamPart<any>): void {
+  addPart(part: ChunkType<OUTPUT>): void {
     // Extract text from text-delta chunks for accumulated text
     if (part.type === 'text-delta') {
-      this.accumulatedText += part.textDelta;
+      this.accumulatedText += part.payload.text;
     }
     this.streamParts.push(part);
+
+    if (this.span) {
+      this.span.input = {
+        streamParts: this.streamParts,
+        state: this.customState,
+        totalChunks: this.streamParts.length,
+        accumulatedText: this.accumulatedText,
+      };
+    }
   }
 }
 
@@ -48,7 +80,7 @@ export class ProcessorRunner {
     this.agentName = agentName;
   }
 
-  async runOutputProcessors(messageList: MessageList, telemetry?: any): Promise<MessageList> {
+  async runOutputProcessors(messageList: MessageList, tracingContext?: TracingContext): Promise<MessageList> {
     const responseMessages = messageList.clear.response.v2();
 
     let processableMessages: MastraMessageV2[] = [...responseMessages];
@@ -75,24 +107,26 @@ export class ProcessorRunner {
         continue;
       }
 
-      if (!telemetry) {
-        processableMessages = await processMethod({ messages: processableMessages, abort: ctx.abort });
-      } else {
-        await telemetry.traceMethod(
-          async () => {
-            processableMessages = await processMethod({ messages: processableMessages, abort: ctx.abort });
-            return processableMessages;
-          },
-          {
-            spanName: `agent.outputProcessor.${processor.name}`,
-            attributes: {
-              'processor.name': processor.name,
-              'processor.index': index.toString(),
-              'processor.total': this.outputProcessors.length.toString(),
-            },
-          },
-        )();
-      }
+      const currentSpan = tracingContext?.currentSpan;
+      const parentSpan = currentSpan?.findParent(AISpanType.AGENT_RUN) || currentSpan?.parent || currentSpan;
+      const processorSpan = parentSpan?.createChildSpan({
+        type: AISpanType.PROCESSOR_RUN,
+        name: `output processor: ${processor.name}`,
+        attributes: {
+          processorName: processor.name,
+          processorType: 'output',
+          processorIndex: index,
+        },
+        input: processableMessages,
+      });
+
+      processableMessages = await processMethod({
+        messages: processableMessages,
+        abort: ctx.abort,
+        tracingContext: { currentSpan: processorSpan },
+      });
+
+      processorSpan?.end({ output: processableMessages });
     }
 
     if (processableMessages.length > 0) {
@@ -105,11 +139,12 @@ export class ProcessorRunner {
   /**
    * Process a stream part through all output processors with state management
    */
-  async processPart(
-    part: TextStreamPart<any> | ObjectStreamPart<any>,
-    processorStates: Map<string, ProcessorState>,
+  async processPart<OUTPUT extends OutputSchema>(
+    part: ChunkType<OUTPUT>,
+    processorStates: Map<string, ProcessorState<OUTPUT>>,
+    tracingContext?: TracingContext,
   ): Promise<{
-    part: TextStreamPart<any> | ObjectStreamPart<any> | null | undefined;
+    part: ChunkType<OUTPUT> | null | undefined;
     blocked: boolean;
     reason?: string;
   }> {
@@ -118,15 +153,20 @@ export class ProcessorRunner {
     }
 
     try {
-      let processedPart: TextStreamPart<any> | ObjectStreamPart<any> | null | undefined = part;
+      let processedPart: ChunkType<OUTPUT> | null | undefined = part;
+      const isFinishChunk = part.type === 'finish';
 
-      for (const processor of this.outputProcessors) {
+      for (const [index, processor] of this.outputProcessors.entries()) {
         try {
           if (processor.processOutputStream && processedPart) {
             // Get or create state for this processor
             let state = processorStates.get(processor.name);
             if (!state) {
-              state = new ProcessorState(processor.name);
+              state = new ProcessorState<OUTPUT>({
+                processorName: processor.name,
+                tracingContext,
+                processorIndex: index,
+              });
               processorStates.set(processor.name, state);
             }
 
@@ -134,40 +174,73 @@ export class ProcessorRunner {
             state.addPart(processedPart);
 
             const result = await processor.processOutputStream({
-              part: processedPart,
-              streamParts: state.streamParts,
+              part: processedPart as ChunkType,
+              streamParts: state.streamParts as ChunkType[],
               state: state.customState,
               abort: (reason?: string) => {
                 throw new TripWire(reason || `Stream part blocked by ${processor.name}`);
               },
+              tracingContext: { currentSpan: state.span },
             });
 
+            if (state.span && !state.span.isEvent) {
+              state.span.output = result;
+            }
+
             // If result is null, or undefined, don't emit
-            processedPart = result;
+            processedPart = result as ChunkType<OUTPUT> | null | undefined;
           }
         } catch (error) {
           if (error instanceof TripWire) {
+            // End span with blocked metadata
+            const state = processorStates.get(processor.name);
+            state?.span?.end({
+              metadata: { blocked: true, reason: error.message },
+            });
             return { part: null, blocked: true, reason: error.message };
           }
+          // End span with error
+          const state = processorStates.get(processor.name);
+          state?.span?.error({ error: error as Error, endSpan: true });
           // Log error but continue with original part
           this.logger.error(`[Agent:${this.agentName}] - Output processor ${processor.name} failed:`, error);
+        }
+      }
+
+      // If this was a finish chunk, end all processor spans AFTER processing
+      if (isFinishChunk) {
+        for (const state of processorStates.values()) {
+          if (state.span) {
+            // Preserve the existing output (last processed part) and add metadata
+            const finalOutput = {
+              ...state.span.output,
+              totalChunks: state.streamParts.length,
+              finalState: state.customState,
+            };
+            state.span.end({ output: finalOutput });
+          }
         }
       }
 
       return { part: processedPart, blocked: false };
     } catch (error) {
       this.logger.error(`[Agent:${this.agentName}] - Stream part processing failed:`, error);
+      // End all spans on fatal error
+      for (const state of processorStates.values()) {
+        state.span?.error({ error: error as Error, endSpan: true });
+      }
       return { part, blocked: false };
     }
   }
 
-  async runOutputProcessorsForStream(
-    streamResult: StreamObjectResult<any, any, any> | StreamTextResult<any, any>,
+  async runOutputProcessorsForStream<OUTPUT extends OutputSchema = undefined>(
+    streamResult: MastraModelOutput<OUTPUT>,
+    tracingContext?: TracingContext,
   ): Promise<ReadableStream<any>> {
     return new ReadableStream({
       start: async controller => {
         const reader = streamResult.fullStream.getReader();
-        const processorStates = new Map<string, ProcessorState>();
+        const processorStates = new Map<string, ProcessorState<OUTPUT>>();
 
         try {
           while (true) {
@@ -179,7 +252,11 @@ export class ProcessorRunner {
             }
 
             // Process all stream parts through output processors
-            const { part: processedPart, blocked, reason } = await this.processPart(value, processorStates);
+            const {
+              part: processedPart,
+              blocked,
+              reason,
+            } = await this.processPart(value, processorStates, tracingContext);
 
             if (blocked) {
               // Log that part was blocked
@@ -208,7 +285,7 @@ export class ProcessorRunner {
     });
   }
 
-  async runInputProcessors(messageList: MessageList, telemetry?: any): Promise<MessageList> {
+  async runInputProcessors(messageList: MessageList, tracingContext?: TracingContext): Promise<MessageList> {
     const userMessages = messageList.clear.input.v2();
 
     let processableMessages: MastraMessageV2[] = [...userMessages];
@@ -235,28 +312,45 @@ export class ProcessorRunner {
         continue;
       }
 
-      if (!telemetry) {
-        processableMessages = await processMethod({ messages: processableMessages, abort: ctx.abort });
-      } else {
-        await telemetry.traceMethod(
-          async () => {
-            processableMessages = await processMethod({ messages: processableMessages, abort: ctx.abort });
-            return processableMessages;
-          },
-          {
-            spanName: `agent.inputProcessor.${processor.name}`,
-            attributes: {
-              'processor.name': processor.name,
-              'processor.index': index.toString(),
-              'processor.total': this.inputProcessors.length.toString(),
-            },
-          },
-        )();
-      }
+      const currentSpan = tracingContext?.currentSpan;
+      const parentSpan = currentSpan?.findParent(AISpanType.AGENT_RUN) || currentSpan?.parent || currentSpan;
+      const processorSpan = parentSpan?.createChildSpan({
+        type: AISpanType.PROCESSOR_RUN,
+        name: `input processor: ${processor.name}`,
+        attributes: {
+          processorName: processor.name,
+          processorType: 'input',
+          processorIndex: index,
+        },
+        input: processableMessages,
+      });
+
+      processableMessages = await processMethod({
+        messages: processableMessages,
+        abort: ctx.abort,
+        tracingContext: { currentSpan: processorSpan },
+      });
+
+      processorSpan?.end({ output: processableMessages });
     }
 
     if (processableMessages.length > 0) {
-      messageList.add(processableMessages, 'user');
+      // Separate system messages from other messages since they need different handling
+      const systemMessages = processableMessages.filter(m => m.role === 'system');
+      const nonSystemMessages = processableMessages.filter(m => m.role !== 'system');
+
+      // Add system messages using addSystem
+      for (const sysMsg of systemMessages) {
+        messageList.addSystem(
+          (sysMsg.content.content as string) ||
+            sysMsg.content.parts.map(p => (p.type === 'text' ? p.text : '')).join('\n'),
+        );
+      }
+
+      // Add non-system messages normally
+      if (nonSystemMessages.length > 0) {
+        messageList.add(nonSystemMessages, 'input');
+      }
     }
 
     return messageList;

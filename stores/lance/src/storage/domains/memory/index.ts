@@ -10,7 +10,15 @@ import {
   TABLE_RESOURCES,
   TABLE_THREADS,
 } from '@mastra/core/storage';
-import type { PaginationInfo, StorageGetMessagesArg, StorageResourceType } from '@mastra/core/storage';
+import type {
+  PaginationInfo,
+  StorageGetMessagesArg,
+  StorageResourceType,
+  StorageListMessagesInput,
+  StorageListMessagesOutput,
+  StorageListThreadsByResourceIdInput,
+  StorageListThreadsByResourceIdOutput,
+} from '@mastra/core/storage';
 import type { StoreOperationsLance } from '../operations';
 import { getTableSchema, processResultWithTypeConversion } from '../utils';
 
@@ -185,6 +193,24 @@ export class StoreMemoryLance extends MemoryStorage {
     }
   }
 
+  private normalizeMessage(message: any): MastraMessageV1 | MastraMessageV2 {
+    const { thread_id, ...rest } = message;
+    return {
+      ...rest,
+      threadId: thread_id,
+      content:
+        typeof message.content === 'string'
+          ? (() => {
+              try {
+                return JSON.parse(message.content);
+              } catch {
+                return message.content;
+              }
+            })()
+          : message.content,
+    };
+  }
+
   public async getMessages(args: StorageGetMessagesArg & { format?: 'v1' }): Promise<MastraMessageV1[]>;
   public async getMessages(args: StorageGetMessagesArg & { format: 'v2' }): Promise<MastraMessageV2[]>;
   public async getMessages({
@@ -195,6 +221,8 @@ export class StoreMemoryLance extends MemoryStorage {
     threadConfig,
   }: StorageGetMessagesArg & { format?: 'v1' | 'v2' }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       if (threadConfig) {
         throw new Error('ThreadConfig is not supported by LanceDB storage');
       }
@@ -241,24 +269,8 @@ export class StoreMemoryLance extends MemoryStorage {
         allRecords,
         await getTableSchema({ tableName: TABLE_MESSAGES, client: this.client }),
       );
-      const normalized = messages.map((msg: any) => {
-        const { thread_id, ...rest } = msg;
-        return {
-          ...rest,
-          threadId: thread_id,
-          content:
-            typeof msg.content === 'string'
-              ? (() => {
-                  try {
-                    return JSON.parse(msg.content);
-                  } catch {
-                    return msg.content;
-                  }
-                })()
-              : msg.content,
-        };
-      });
-      const list = new MessageList({ threadId, resourceId }).add(normalized, 'memory');
+
+      const list = new MessageList({ threadId, resourceId }).add(messages.map(this.normalizeMessage), 'memory');
       if (format === 'v2') return list.get.all.v2();
       return list.get.all.v1();
     } catch (error: any) {
@@ -267,10 +279,90 @@ export class StoreMemoryLance extends MemoryStorage {
           id: 'LANCE_STORE_GET_MESSAGES_FAILED',
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
+          details: {
+            threadId,
+            resourceId: resourceId ?? '',
+          },
         },
         error,
       );
     }
+  }
+
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format: 'v1';
+  }): Promise<MastraMessageV1[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v2';
+  }): Promise<MastraMessageV2[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    if (messageIds.length === 0) return [];
+    try {
+      const table = await this.client.openTable(TABLE_MESSAGES);
+
+      const quotedIds = messageIds.map(id => `'${id}'`).join(', ');
+      const allRecords = await table.query().where(`id IN (${quotedIds})`).toArray();
+
+      const messages = processResultWithTypeConversion(
+        allRecords,
+        await getTableSchema({ tableName: TABLE_MESSAGES, client: this.client }),
+      );
+
+      const list = new MessageList().add(messages.map(this.normalizeMessage), 'memory');
+      if (format === `v1`) return list.get.all.v1();
+      return list.get.all.v2();
+    } catch (error: any) {
+      throw new MastraError(
+        {
+          id: 'LANCE_STORE_GET_MESSAGES_BY_ID_FAILED',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: {
+            messageIds: JSON.stringify(messageIds),
+          },
+        },
+        error,
+      );
+    }
+  }
+
+  public async listMessages(_args: StorageListMessagesInput): Promise<StorageListMessagesOutput> {
+    throw new Error(
+      `listMessages is not yet implemented by this storage adapter (${this.constructor.name}). ` +
+        `This method is currently being rolled out across all storage adapters. ` +
+        `Please use getMessages or getMessagesPaginated as an alternative, or wait for the implementation.`,
+    );
+  }
+
+  public async listMessagesById({ messageIds }: { messageIds: string[] }): Promise<MastraMessageV2[]> {
+    return this.getMessagesById({ messageIds, format: 'v2' });
+  }
+
+  /**
+   * @todo When migrating from getThreadsByResourceIdPaginated to this method,
+   * implement orderBy and sortDirection support for full sorting capabilities
+   */
+  public async listThreadsByResourceId(
+    args: StorageListThreadsByResourceIdInput,
+  ): Promise<StorageListThreadsByResourceIdOutput> {
+    const { resourceId, limit, offset } = args;
+    const page = Math.floor(offset / limit);
+    const perPage = limit;
+    return this.getThreadsByResourceIdPaginated({ resourceId, page, perPage });
   }
 
   async saveMessages(args: { messages: MastraMessageV1[]; format?: undefined | 'v1' }): Promise<MastraMessageV1[]>;
@@ -467,16 +559,14 @@ export class StoreMemoryLance extends MemoryStorage {
   async getMessagesPaginated(
     args: StorageGetMessagesArg & { format?: 'v1' | 'v2' },
   ): Promise<PaginationInfo & { messages: MastraMessageV1[] | MastraMessageV2[] }> {
-    try {
-      const { threadId, resourceId, selectBy, format = 'v1' } = args;
+    const { threadId, resourceId, selectBy, format = 'v1' } = args;
+    const page = selectBy?.pagination?.page ?? 0;
+    const perPage = selectBy?.pagination?.perPage ?? 10;
 
-      if (!threadId) {
-        throw new Error('Thread ID is required for getMessagesPaginated');
-      }
+    try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
 
       // Extract pagination and dateRange from selectBy.pagination
-      const page = selectBy?.pagination?.page ?? 0;
-      const perPage = selectBy?.pagination?.perPage ?? 10;
       const dateRange = selectBy?.pagination?.dateRange;
       const fromDate = dateRange?.start;
       const toDate = dateRange?.end;
@@ -615,14 +705,21 @@ export class StoreMemoryLance extends MemoryStorage {
         hasMore: total > (page + 1) * perPage,
       };
     } catch (error: any) {
-      throw new MastraError(
+      const mastraError = new MastraError(
         {
           id: 'LANCE_STORE_GET_MESSAGES_PAGINATED_FAILED',
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
+          details: {
+            threadId,
+            resourceId: resourceId ?? '',
+          },
         },
         error,
       );
+      this.logger?.trackException?.(mastraError);
+      this.logger?.error?.(mastraError.toString());
+      return { messages: [], total: 0, page, perPage, hasMore: false };
     }
   }
 

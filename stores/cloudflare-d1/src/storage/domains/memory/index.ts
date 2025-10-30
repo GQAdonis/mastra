@@ -11,7 +11,15 @@ import {
   TABLE_THREADS,
   TABLE_RESOURCES,
 } from '@mastra/core/storage';
-import type { PaginationInfo, StorageGetMessagesArg, StorageResourceType } from '@mastra/core/storage';
+import type {
+  PaginationInfo,
+  StorageGetMessagesArg,
+  StorageResourceType,
+  StorageListMessagesInput,
+  StorageListMessagesOutput,
+  StorageListThreadsByResourceIdInput,
+  StorageListThreadsByResourceIdOutput,
+} from '@mastra/core/storage';
 import { createSqlBuilder } from '../../sql-builder';
 import type { StoreOperationsD1 } from '../operations';
 import { deserializeValue, isArrayOfRecords } from '../utils';
@@ -173,8 +181,6 @@ export class MemoryStorageD1 extends MemoryStorage {
     });
 
     if (!thread) return null;
-
-    console.log('thread', thread);
 
     try {
       return {
@@ -523,6 +529,8 @@ export class MemoryStorageD1 extends MemoryStorage {
   }
 
   private async _getIncludedMessages(threadId: string, selectBy: StorageGetMessagesArg['selectBy']) {
+    if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
     const include = selectBy?.include;
     if (!include) return null;
 
@@ -599,18 +607,20 @@ export class MemoryStorageD1 extends MemoryStorage {
   public async getMessages(args: StorageGetMessagesArg & { format: 'v2' }): Promise<MastraMessageV2[]>;
   public async getMessages({
     threadId,
+    resourceId,
     selectBy,
     format,
   }: StorageGetMessagesArg & { format?: 'v1' | 'v2' }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
-    const fullTableName = this.operations.getTableName(TABLE_MESSAGES);
-    const limit = resolveMessageLimit({
-      last: selectBy?.last,
-      defaultLimit: 40,
-    });
-    const include = selectBy?.include || [];
-    const messages: any[] = [];
-
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+      const fullTableName = this.operations.getTableName(TABLE_MESSAGES);
+      const limit = resolveMessageLimit({
+        last: selectBy?.last,
+        defaultLimit: 40,
+      });
+      const include = selectBy?.include || [];
+      const messages: any[] = [];
+
       if (include.length) {
         const includeResult = await this._getIncludedMessages(threadId, selectBy);
         if (Array.isArray(includeResult)) messages.push(...includeResult);
@@ -668,7 +678,7 @@ export class MemoryStorageD1 extends MemoryStorage {
           text: `Failed to retrieve messages for thread ${threadId}: ${
             error instanceof Error ? error.message : String(error)
           }`,
-          details: { threadId },
+          details: { threadId, resourceId: resourceId ?? '' },
         },
         error,
       );
@@ -678,8 +688,105 @@ export class MemoryStorageD1 extends MemoryStorage {
     }
   }
 
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format: 'v1';
+  }): Promise<MastraMessageV1[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v2';
+  }): Promise<MastraMessageV2[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    if (messageIds.length === 0) return [];
+    const fullTableName = this.operations.getTableName(TABLE_MESSAGES);
+    const messages: any[] = [];
+
+    try {
+      const query = createSqlBuilder()
+        .select(['id', 'content', 'role', 'type', 'createdAt', 'thread_id AS threadId', 'resourceId'])
+        .from(fullTableName)
+        .where(`id in (${messageIds.map(() => '?').join(',')})`, ...messageIds);
+
+      query.orderBy('createdAt', 'DESC');
+
+      const { sql, params } = query.build();
+
+      const result = await this.operations.executeQuery({ sql, params });
+
+      if (Array.isArray(result)) messages.push(...result);
+
+      // Parse message content
+      const processedMessages = messages.map(message => {
+        const processedMsg: Record<string, any> = {};
+
+        for (const [key, value] of Object.entries(message)) {
+          if (key === `type` && value === `v2`) continue;
+          processedMsg[key] = deserializeValue(value);
+        }
+
+        return processedMsg;
+      });
+      this.logger.debug(`Retrieved ${messages.length} messages`);
+      const list = new MessageList().add(processedMessages as MastraMessageV1[] | MastraMessageV2[], 'memory');
+      if (format === `v1`) return list.get.all.v1();
+      return list.get.all.v2();
+    } catch (error) {
+      const mastraError = new MastraError(
+        {
+          id: 'CLOUDFLARE_D1_STORAGE_GET_MESSAGES_BY_ID_ERROR',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          text: `Failed to retrieve messages by ID: ${error instanceof Error ? error.message : String(error)}`,
+          details: { messageIds: JSON.stringify(messageIds) },
+        },
+        error,
+      );
+      this.logger?.error(mastraError.toString());
+      this.logger?.trackException(mastraError);
+      throw mastraError;
+    }
+  }
+
+  public async listMessages(_args: StorageListMessagesInput): Promise<StorageListMessagesOutput> {
+    throw new Error(
+      `listMessages is not yet implemented by this storage adapter (${this.constructor.name}). ` +
+        `This method is currently being rolled out across all storage adapters. ` +
+        `Please use getMessages or getMessagesPaginated as an alternative, or wait for the implementation.`,
+    );
+  }
+
+  public async listMessagesById({ messageIds }: { messageIds: string[] }): Promise<MastraMessageV2[]> {
+    return this.getMessagesById({ messageIds, format: 'v2' });
+  }
+
+  /**
+   * @todo When migrating from getThreadsByResourceIdPaginated to this method,
+   * implement orderBy and sortDirection support for full sorting capabilities
+   */
+  public async listThreadsByResourceId(
+    args: StorageListThreadsByResourceIdInput,
+  ): Promise<StorageListThreadsByResourceIdOutput> {
+    const { resourceId, limit, offset } = args;
+    const page = Math.floor(offset / limit);
+    const perPage = limit;
+    return this.getThreadsByResourceIdPaginated({ resourceId, page, perPage });
+  }
+
   public async getMessagesPaginated({
     threadId,
+    resourceId,
     selectBy,
     format,
   }: StorageGetMessagesArg & { format?: 'v1' | 'v2' }): Promise<
@@ -694,6 +801,8 @@ export class MemoryStorageD1 extends MemoryStorage {
     const messages: any[] = [];
 
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       if (selectBy?.include?.length) {
         const includeResult = await this._getIncludedMessages(threadId, selectBy);
         if (Array.isArray(includeResult)) messages.push(...includeResult);
@@ -807,7 +916,7 @@ export class MemoryStorageD1 extends MemoryStorage {
           text: `Failed to retrieve messages for thread ${threadId}: ${
             error instanceof Error ? error.message : String(error)
           }`,
-          details: { threadId },
+          details: { threadId, resourceId: resourceId ?? '' },
         },
         error,
       );

@@ -6,6 +6,7 @@ import { canAccessPublicly, checkRules, isProtectedPath, isDevPlaygroundRequest 
 export const authenticationMiddleware = async (c: ContextWithMastra, next: Next) => {
   const mastra = c.get('mastra');
   const authConfig = mastra.getServer()?.experimental_auth;
+  const customRouteAuthConfig = c.get('customRouteAuthConfig');
 
   if (!authConfig) {
     // No auth config, skip authentication
@@ -17,7 +18,7 @@ export const authenticationMiddleware = async (c: ContextWithMastra, next: Next)
     return next();
   }
 
-  if (!isProtectedPath(c.req.path, c.req.method, authConfig)) {
+  if (!isProtectedPath(c.req.path, c.req.method, authConfig, customRouteAuthConfig)) {
     return next();
   }
 
@@ -67,6 +68,7 @@ export const authenticationMiddleware = async (c: ContextWithMastra, next: Next)
 export const authorizationMiddleware = async (c: ContextWithMastra, next: Next) => {
   const mastra = c.get('mastra');
   const authConfig = mastra.getServer()?.experimental_auth;
+  const customRouteAuthConfig = c.get('customRouteAuthConfig');
 
   if (!authConfig) {
     // No auth config, skip authorization
@@ -81,7 +83,7 @@ export const authorizationMiddleware = async (c: ContextWithMastra, next: Next) 
     return next();
   }
 
-  if (!isProtectedPath(c.req.path, c.req.method, authConfig)) {
+  if (!isProtectedPath(c.req.path, c.req.method, authConfig, customRouteAuthConfig)) {
     return next();
   }
 

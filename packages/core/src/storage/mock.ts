@@ -1,30 +1,26 @@
 import type { MastraMessageV2 } from '../agent';
 import type { MastraMessageV1, StorageThreadType } from '../memory/types';
 import type { ScoreRowData, ScoringSource } from '../scores/types';
-import type { Trace } from '../telemetry';
-import type { WorkflowRunState } from '../workflows';
+import type { StepResult, WorkflowRunState } from '../workflows/types';
 import { MastraStorage } from './base';
 import type { StorageDomains } from './base';
 import type { TABLE_NAMES } from './constants';
-import { InMemoryLegacyEvals } from './domains/legacy-evals/inmemory';
-import type { InMemoryEvals } from './domains/legacy-evals/inmemory';
 import { InMemoryMemory } from './domains/memory/inmemory';
 import type { InMemoryThreads, InMemoryResources, InMemoryMessages } from './domains/memory/inmemory';
+import { ObservabilityInMemory } from './domains/observability/inmemory';
+import type { InMemoryObservability } from './domains/observability/inmemory';
 import { StoreOperationsInMemory } from './domains/operations/inmemory';
 import { ScoresInMemory } from './domains/scores/inmemory';
 import type { InMemoryScores } from './domains/scores/inmemory';
-import { TracesInMemory } from './domains/traces/inmemory';
-import type { InMemoryTraces } from './domains/traces/inmemory';
 import { WorkflowsInMemory } from './domains/workflows';
 import type { InMemoryWorkflows } from './domains/workflows/inmemory';
 
 import type {
-  EvalRow,
-  PaginationArgs,
+  AISpanRecord,
+  AITraceRecord,
   PaginationInfo,
   StorageColumn,
   StorageGetMessagesArg,
-  StorageGetTracesPaginatedArg,
   StoragePagination,
   StorageResourceType,
   ThreadSortOptions,
@@ -53,11 +49,6 @@ export class InMemoryStore extends MastraStorage {
       operations: operationsStorage,
     });
 
-    const tracesStorage = new TracesInMemory({
-      collection: database.mastra_traces as InMemoryTraces,
-      operations: operationsStorage,
-    });
-
     const memoryStorage = new InMemoryMemory({
       collection: {
         threads: database.mastra_threads as InMemoryThreads,
@@ -67,17 +58,17 @@ export class InMemoryStore extends MastraStorage {
       operations: operationsStorage,
     });
 
-    const legacyEvalsStorage = new InMemoryLegacyEvals({
-      collection: database.mastra_evals as InMemoryEvals,
+    const observabilityStorage = new ObservabilityInMemory({
+      collection: database.mastra_ai_spans as InMemoryObservability,
+      operations: operationsStorage,
     });
 
     this.stores = {
-      legacyEvals: legacyEvalsStorage,
       operations: operationsStorage,
       workflows: workflowsStorage,
-      traces: tracesStorage,
       scores: scoresStorage,
       memory: memoryStorage,
+      observability: observabilityStorage,
     };
   }
 
@@ -88,19 +79,24 @@ export class InMemoryStore extends MastraStorage {
       hasColumn: false,
       createTable: false,
       deleteMessages: true,
+      aiTracing: true,
+      indexManagement: false,
+      getScoresBySpan: true,
     };
   }
 
   async persistWorkflowSnapshot({
     workflowName,
     runId,
+    resourceId,
     snapshot,
   }: {
     workflowName: string;
     runId: string;
+    resourceId?: string;
     snapshot: WorkflowRunState;
   }): Promise<void> {
-    await this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, snapshot });
+    await this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, resourceId, snapshot });
   }
 
   async loadWorkflowSnapshot({
@@ -145,6 +141,40 @@ export class InMemoryStore extends MastraStorage {
 
   async insert({ tableName, record }: { tableName: TABLE_NAMES; record: Record<string, any> }): Promise<void> {
     await this.stores.operations.insert({ tableName, record });
+  }
+
+  async updateWorkflowResults({
+    workflowName,
+    runId,
+    stepId,
+    result,
+    runtimeContext,
+  }: {
+    workflowName: string;
+    runId: string;
+    stepId: string;
+    result: StepResult<any, any, any, any>;
+    runtimeContext: Record<string, any>;
+  }): Promise<Record<string, StepResult<any, any, any, any>>> {
+    return this.stores.workflows.updateWorkflowResults({ workflowName, runId, stepId, result, runtimeContext });
+  }
+
+  async updateWorkflowState({
+    workflowName,
+    runId,
+    opts,
+  }: {
+    workflowName: string;
+    runId: string;
+    opts: {
+      status: string;
+      result?: StepResult<any, any, any, any>;
+      error?: string;
+      suspendedPaths?: Record<string, number[]>;
+      waitingPaths?: Record<string, number[]>;
+    };
+  }): Promise<WorkflowRunState | undefined> {
+    return this.stores.workflows.updateWorkflowState({ workflowName, runId, opts });
   }
 
   async batchInsert({ tableName, records }: { tableName: TABLE_NAMES; records: Record<string, any>[] }): Promise<void> {
@@ -220,6 +250,18 @@ export class InMemoryStore extends MastraStorage {
     >;
   }
 
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format: 'v1' }): Promise<MastraMessageV1[]>;
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format?: 'v2' }): Promise<MastraMessageV2[]>;
+  async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    return this.stores.memory.getMessagesById({ messageIds, format });
+  }
+
   async saveMessages(args: { messages: MastraMessageV1[]; format?: undefined | 'v1' }): Promise<MastraMessageV1[]>;
   async saveMessages(args: { messages: MastraMessageV2[]; format: 'v2' }): Promise<MastraMessageV2[]>;
   async saveMessages(
@@ -253,36 +295,6 @@ export class InMemoryStore extends MastraStorage {
     PaginationInfo & { messages: MastraMessageV1[] | MastraMessageV2[] }
   > {
     return this.stores.memory.getMessagesPaginated({ threadId, selectBy });
-  }
-
-  async getTraces({
-    name,
-    scope,
-    page,
-    perPage,
-    attributes,
-    filters,
-    fromDate,
-    toDate,
-  }: {
-    name?: string;
-    scope?: string;
-    page: number;
-    perPage: number;
-    attributes?: Record<string, string>;
-    filters?: Record<string, any>;
-    fromDate?: Date;
-    toDate?: Date;
-  }): Promise<any[]> {
-    return this.stores.traces.getTraces({ name, scope, page, perPage, attributes, filters, fromDate, toDate });
-  }
-
-  async getTracesPaginated(args: StorageGetTracesPaginatedArg): Promise<PaginationInfo & { traces: Trace[] }> {
-    return this.stores.traces.getTracesPaginated(args);
-  }
-
-  async batchTraceInsert(args: { records: Record<string, any>[] }): Promise<void> {
-    return this.stores.traces.batchTraceInsert(args);
   }
 
   async getScoreById({ id }: { id: string }): Promise<ScoreRowData | null> {
@@ -331,14 +343,16 @@ export class InMemoryStore extends MastraStorage {
     return this.stores.scores.getScoresByEntityId({ entityId, entityType, pagination });
   }
 
-  async getEvals(
-    options: { agentName?: string; type?: 'test' | 'live' } & PaginationArgs,
-  ): Promise<PaginationInfo & { evals: EvalRow[] }> {
-    return this.stores.legacyEvals.getEvals(options);
-  }
-
-  async getEvalsByAgentName(agentName: string, type?: 'test' | 'live'): Promise<EvalRow[]> {
-    return this.stores.legacyEvals.getEvalsByAgentName(agentName, type);
+  async getScoresBySpan({
+    traceId,
+    spanId,
+    pagination,
+  }: {
+    traceId: string;
+    spanId: string;
+    pagination: StoragePagination;
+  }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
+    return this.stores.scores.getScoresBySpan({ traceId, spanId, pagination });
   }
 
   async getWorkflowRuns({
@@ -367,6 +381,36 @@ export class InMemoryStore extends MastraStorage {
     workflowName?: string;
   }): Promise<WorkflowRun | null> {
     return this.stores.workflows.getWorkflowRunById({ runId, workflowName });
+  }
+
+  async createAISpan(span: AISpanRecord): Promise<void> {
+    return this.stores.observability!.createAISpan(span);
+  }
+
+  async updateAISpan(params: {
+    spanId: string;
+    traceId: string;
+    updates: Partial<Omit<AISpanRecord, 'spanId' | 'traceId'>>;
+  }): Promise<void> {
+    return this.stores.observability!.updateAISpan(params);
+  }
+
+  async getAITrace(traceId: string): Promise<AITraceRecord | null> {
+    return this.stores.observability!.getAITrace(traceId);
+  }
+
+  async batchCreateAISpans(args: { records: AISpanRecord[] }): Promise<void> {
+    return this.stores.observability!.batchCreateAISpans(args);
+  }
+
+  async batchUpdateAISpans(args: {
+    records: { traceId: string; spanId: string; updates: Partial<Omit<AISpanRecord, 'spanId' | 'traceId'>> }[];
+  }): Promise<void> {
+    return this.stores.observability!.batchUpdateAISpans(args);
+  }
+
+  async batchDeleteAITraces(args: { traceIds: string[] }): Promise<void> {
+    return this.stores.observability!.batchDeleteAITraces(args);
   }
 }
 

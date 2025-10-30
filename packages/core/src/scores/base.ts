@@ -1,11 +1,14 @@
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { Agent } from '../agent';
+import { tryGenerateWithJsonFallback } from '../agent/utils';
+import { InternalSpans } from '../ai-tracing';
+import type { TracingContext } from '../ai-tracing';
 import { ErrorCategory, ErrorDomain, MastraError } from '../error';
-import type { LanguageModel } from '../llm';
-import type { MastraLanguageModel } from '../memory';
+import { resolveModelConfig } from '../llm/model/resolve-model';
+import type { MastraModelConfig } from '../llm/model/shared.types';
 import { createWorkflow, createStep } from '../workflows';
-import type { ScoringSamplingConfig } from './types';
+import type { ScoringSamplingConfig, ScorerRunInputForAgent, ScorerRunOutputForAgent } from './types';
 
 interface ScorerStepDefinition {
   name: string;
@@ -13,17 +16,31 @@ interface ScorerStepDefinition {
   isPromptObject: boolean;
 }
 
+// Predefined type shortcuts for common scorer patterns
+type ScorerTypeShortcuts = {
+  agent: {
+    input: ScorerRunInputForAgent;
+    output: ScorerRunOutputForAgent;
+  };
+};
+
 // Pipeline scorer
 // TInput and TRunOutput establish the type contract for the entire scorer pipeline,
 // ensuring type safety flows through all steps and contexts
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 interface ScorerConfig<TName extends string = string, TInput = any, TRunOutput = any> {
   name: TName;
   description: string;
   judge?: {
-    model: LanguageModel;
+    model: MastraModelConfig;
     instructions: string;
   };
+  // Optional type specification - can be enum shortcut or explicit schemas
+  type?:
+    | keyof ScorerTypeShortcuts
+    | {
+        input: z.ZodSchema<TInput>;
+        output: z.ZodSchema<TRunOutput>;
+      };
 }
 
 // Standardized input type for all pipelines
@@ -33,6 +50,7 @@ interface ScorerRun<TInput = any, TOutput = any> {
   output: TOutput;
   groundTruth?: any;
   runtimeContext?: Record<string, any>;
+  tracingContext?: TracingContext;
 }
 
 // Prompt object definition with conditional typing
@@ -46,7 +64,7 @@ interface PromptObject<
   description: string;
   outputSchema: z.ZodSchema<TOutput>;
   judge?: {
-    model: MastraLanguageModel;
+    model: MastraModelConfig;
     instructions: string;
   };
 
@@ -124,7 +142,7 @@ type GenerateScoreFunctionStep<TAccumulated extends Record<string, any>, TInput,
 interface GenerateScorePromptObject<TAccumulated extends Record<string, any>, TInput, TRunOutput> {
   description: string;
   judge?: {
-    model: MastraLanguageModel;
+    model: MastraModelConfig;
     instructions: string;
   };
   // Support both sync and async createPrompt
@@ -135,7 +153,7 @@ interface GenerateScorePromptObject<TAccumulated extends Record<string, any>, TI
 interface GenerateReasonPromptObject<TAccumulated extends Record<string, any>, TInput, TRunOutput> {
   description: string;
   judge?: {
-    model: MastraLanguageModel;
+    model: MastraModelConfig;
     instructions: string;
   };
   // Support both sync and async createPrompt
@@ -177,6 +195,10 @@ class MastraScorer<
       | GenerateScorePromptObject<any, TInput, TRunOutput>
     > = new Map(),
   ) {}
+
+  get type() {
+    return this.config.type;
+  }
 
   get name(): TName {
     return this.config.name;
@@ -331,6 +353,8 @@ class MastraScorer<
       });
     }
 
+    const { tracingContext } = input;
+
     let runId = input.runId;
     if (!runId) {
       runId = randomUUID();
@@ -344,6 +368,7 @@ class MastraScorer<
       inputData: {
         run,
       },
+      tracingContext,
     });
 
     if (workflowResult.status === 'failed') {
@@ -396,7 +421,7 @@ class MastraScorer<
         description: `Scorer step: ${scorerStep.name}`,
         inputSchema: z.any(),
         outputSchema: z.any(),
-        execute: async ({ inputData, getInitData }) => {
+        execute: async ({ inputData, getInitData, tracingContext }) => {
           const { accumulatedResults = {}, generatedPrompts = {} } = inputData;
           const { run } = getInitData();
 
@@ -405,7 +430,7 @@ class MastraScorer<
           let stepResult;
           let newGeneratedPrompts = generatedPrompts;
           if (scorerStep.isPromptObject) {
-            const { result, prompt } = await this.executePromptStep(scorerStep, context);
+            const { result, prompt } = await this.executePromptStep(scorerStep, tracingContext, context);
             stepResult = result;
             newGeneratedPrompts = {
               ...generatedPrompts,
@@ -446,6 +471,12 @@ class MastraScorer<
         generateScorePrompt: z.string().optional(),
         generateReasonPrompt: z.string().optional(),
       }),
+      options: {
+        // mark all spans generated as part of the scorer workflow internal
+        tracingPolicy: {
+          internal: InternalSpans.ALL,
+        },
+      },
     });
 
     let chainedWorkflow = workflow;
@@ -474,17 +505,17 @@ class MastraScorer<
     return await scorerStep.definition(context);
   }
 
-  private async executePromptStep(scorerStep: ScorerStepDefinition, context: any) {
+  private async executePromptStep(scorerStep: ScorerStepDefinition, tracingContext: TracingContext, context: any) {
     const originalStep = this.originalPromptObjects.get(scorerStep.name);
     if (!originalStep) {
       throw new Error(`Step "${scorerStep.name}" is not a prompt object`);
     }
 
     const prompt = await originalStep.createPrompt(context);
-    const model = originalStep.judge?.model ?? this.config.judge?.model;
+    const modelConfig = originalStep.judge?.model ?? this.config.judge?.model;
     const instructions = originalStep.judge?.instructions ?? this.config.judge?.instructions;
 
-    if (!model || !instructions) {
+    if (!modelConfig || !instructions) {
       throw new MastraError({
         id: 'MASTR_SCORER_FAILED_TO_RUN_MISSING_MODEL_OR_INSTRUCTIONS',
         domain: ErrorDomain.SCORER,
@@ -497,24 +528,60 @@ class MastraScorer<
       });
     }
 
-    const judge = new Agent({ name: 'judge', model, instructions });
+    // Resolve the model configuration to a LanguageModel instance
+    const resolvedModel = await resolveModelConfig(modelConfig);
+
+    const judge = new Agent({
+      name: 'judge',
+      model: resolvedModel,
+      instructions,
+      options: { tracingPolicy: { internal: InternalSpans.ALL } },
+    });
 
     // GenerateScore output must be a number
     if (scorerStep.name === 'generateScore') {
-      const result = await judge.generate(prompt, {
-        output: z.object({ score: z.number() }),
-      });
+      const schema = z.object({ score: z.number() });
+      let result;
+      if (resolvedModel.specificationVersion === 'v2') {
+        result = await tryGenerateWithJsonFallback(judge, prompt, {
+          structuredOutput: {
+            schema,
+          },
+          tracingContext,
+        });
+      } else {
+        result = await judge.generateLegacy(prompt, {
+          output: schema,
+          tracingContext,
+        });
+      }
       return { result: result.object.score, prompt };
 
       // GenerateReason output must be a string
     } else if (scorerStep.name === 'generateReason') {
-      const result = await judge.generate(prompt);
+      let result;
+      if (resolvedModel.specificationVersion === 'v2') {
+        result = await judge.generate(prompt, { tracingContext });
+      } else {
+        result = await judge.generateLegacy(prompt, { tracingContext });
+      }
       return { result: result.text, prompt };
     } else {
       const promptStep = originalStep as PromptObject<any, any, any, TInput, TRunOutput>;
-      const result = await judge.generate(prompt, {
-        output: promptStep.outputSchema,
-      });
+      let result;
+      if (resolvedModel.specificationVersion === 'v2') {
+        result = await tryGenerateWithJsonFallback(judge, prompt, {
+          structuredOutput: {
+            schema: promptStep.outputSchema,
+          },
+          tracingContext,
+        });
+      } else {
+        result = await judge.generateLegacy(prompt, {
+          output: promptStep.outputSchema,
+          tracingContext,
+        });
+      }
       return { result: result.object, prompt };
     }
   }
@@ -544,13 +611,36 @@ class MastraScorer<
   }
 }
 
+// Overload: enum type shortcuts (e.g., type: 'agent')
+export function createScorer<TName extends string, TType extends keyof ScorerTypeShortcuts>(
+  config: Omit<ScorerConfig<TName, any, any>, 'type'> & {
+    type: TType;
+  },
+): MastraScorer<TName, ScorerTypeShortcuts[TType]['input'], ScorerTypeShortcuts[TType]['output'], {}>;
+
+// Overload: infer TInput/TRunOutput from provided Zod schemas in config.type
+export function createScorer<
+  TName extends string,
+  TInputSchema extends z.ZodTypeAny,
+  TOutputSchema extends z.ZodTypeAny,
+>(
+  config: Omit<ScorerConfig<TName, z.infer<TInputSchema>, z.infer<TOutputSchema>>, 'type'> & {
+    type: { input: TInputSchema; output: TOutputSchema };
+  },
+): MastraScorer<TName, z.infer<TInputSchema>, z.infer<TOutputSchema>, {}>;
+
+// Overload: explicit generics (backwards compatible)
 export function createScorer<TInput = any, TRunOutput = any, TName extends string = string>(
   config: ScorerConfig<TName, TInput, TRunOutput>,
-): MastraScorer<TName, TInput, TRunOutput, {}> {
-  return new MastraScorer<TName, TInput, TRunOutput, {}>({
+): MastraScorer<TName, TInput, TRunOutput, {}>;
+
+// Implementation
+export function createScorer(config: any): any {
+  return new MastraScorer({
     name: config.name,
     description: config.description,
     judge: config.judge,
+    type: config.type,
   });
 }
 

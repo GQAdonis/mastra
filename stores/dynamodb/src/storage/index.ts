@@ -7,29 +7,23 @@ import type { StorageThreadType, MastraMessageV2, MastraMessageV1 } from '@mastr
 import type { ScoreRowData, ScoringSource } from '@mastra/core/scores';
 import { MastraStorage } from '@mastra/core/storage';
 import type {
-  EvalRow,
   StorageGetMessagesArg,
   WorkflowRun,
   WorkflowRuns,
   TABLE_NAMES,
-  StorageGetTracesArg,
   PaginationInfo,
   StorageColumn,
   StoragePagination,
   StorageDomains,
-  PaginationArgs,
   StorageResourceType,
   ThreadSortOptions,
 } from '@mastra/core/storage';
-import type { Trace } from '@mastra/core/telemetry';
-import type { WorkflowRunState } from '@mastra/core/workflows';
+import type { StepResult, WorkflowRunState } from '@mastra/core/workflows';
 import type { Service } from 'electrodb';
 import { getElectroDbService } from '../entities';
-import { LegacyEvalsDynamoDB } from './domains/legacy-evals';
 import { MemoryStorageDynamoDB } from './domains/memory';
 import { StoreOperationsDynamoDB } from './domains/operations';
 import { ScoresStorageDynamoDB } from './domains/score';
-import { TracesStorageDynamoDB } from './domains/traces';
 import { WorkflowStorageDynamoDB } from './domains/workflows';
 
 export interface DynamoDBStoreConfig {
@@ -85,8 +79,6 @@ export class DynamoDBStore extends MastraStorage {
         client: this.client,
       });
 
-      const traces = new TracesStorageDynamoDB({ service: this.service, operations });
-
       const workflows = new WorkflowStorageDynamoDB({ service: this.service });
 
       const memory = new MemoryStorageDynamoDB({ service: this.service });
@@ -95,8 +87,6 @@ export class DynamoDBStore extends MastraStorage {
 
       this.stores = {
         operations,
-        legacyEvals: new LegacyEvalsDynamoDB({ service: this.service, tableName: this.tableName }),
-        traces,
         workflows,
         memory,
         scores,
@@ -123,6 +113,7 @@ export class DynamoDBStore extends MastraStorage {
       hasColumn: false,
       createTable: false,
       deleteMessages: false,
+      getScoresBySpan: true,
     };
   }
 
@@ -291,6 +282,18 @@ export class DynamoDBStore extends MastraStorage {
     return this.stores.memory.getMessages({ threadId, resourceId, selectBy, format });
   }
 
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format: 'v1' }): Promise<MastraMessageV1[]>;
+  async getMessagesById({ messageIds, format }: { messageIds: string[]; format?: 'v2' }): Promise<MastraMessageV2[]>;
+  async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    return this.stores.memory.getMessagesById({ messageIds, format });
+  }
+
   async saveMessages(args: { messages: MastraMessageV1[]; format?: undefined | 'v1' }): Promise<MastraMessageV1[]>;
   async saveMessages(args: { messages: MastraMessageV2[]; format: 'v2' }): Promise<MastraMessageV2[]>;
   async saveMessages(
@@ -325,37 +328,53 @@ export class DynamoDBStore extends MastraStorage {
     return this.stores.memory.updateMessages(_args);
   }
 
-  // Trace operations
-  async getTraces(args: {
-    name?: string;
-    scope?: string;
-    page: number;
-    perPage: number;
-    attributes?: Record<string, string>;
-    filters?: Record<string, any>;
-  }): Promise<any[]> {
-    return this.stores.traces.getTraces(args);
-  }
-
-  async batchTraceInsert({ records }: { records: Record<string, any>[] }): Promise<void> {
-    return this.stores.traces.batchTraceInsert({ records });
-  }
-
-  async getTracesPaginated(_args: StorageGetTracesArg): Promise<PaginationInfo & { traces: Trace[] }> {
-    return this.stores.traces.getTracesPaginated(_args);
-  }
-
   // Workflow operations
+  async updateWorkflowResults({
+    workflowName,
+    runId,
+    stepId,
+    result,
+    runtimeContext,
+  }: {
+    workflowName: string;
+    runId: string;
+    stepId: string;
+    result: StepResult<any, any, any, any>;
+    runtimeContext: Record<string, any>;
+  }): Promise<Record<string, StepResult<any, any, any, any>>> {
+    return this.stores.workflows.updateWorkflowResults({ workflowName, runId, stepId, result, runtimeContext });
+  }
+
+  async updateWorkflowState({
+    workflowName,
+    runId,
+    opts,
+  }: {
+    workflowName: string;
+    runId: string;
+    opts: {
+      status: string;
+      result?: StepResult<any, any, any, any>;
+      error?: string;
+      suspendedPaths?: Record<string, number[]>;
+      waitingPaths?: Record<string, number[]>;
+    };
+  }): Promise<WorkflowRunState | undefined> {
+    return this.stores.workflows.updateWorkflowState({ workflowName, runId, opts });
+  }
+
   async persistWorkflowSnapshot({
     workflowName,
     runId,
+    resourceId,
     snapshot,
   }: {
     workflowName: string;
     runId: string;
+    resourceId?: string;
     snapshot: WorkflowRunState;
   }): Promise<void> {
-    return this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, snapshot });
+    return this.stores.workflows.persistWorkflowSnapshot({ workflowName, runId, resourceId, snapshot });
   }
 
   async loadWorkflowSnapshot({
@@ -401,20 +420,6 @@ export class DynamoDBStore extends MastraStorage {
     metadata?: Record<string, any>;
   }): Promise<StorageResourceType> {
     return this.stores.memory.updateResource({ resourceId, workingMemory, metadata });
-  }
-
-  // Eval operations
-  async getEvalsByAgentName(agentName: string, type?: 'test' | 'live'): Promise<EvalRow[]> {
-    return this.stores.legacyEvals.getEvalsByAgentName(agentName, type);
-  }
-
-  async getEvals(
-    options: {
-      agentName?: string;
-      type?: 'test' | 'live';
-    } & PaginationArgs,
-  ): Promise<PaginationInfo & { evals: EvalRow[] }> {
-    return this.stores.legacyEvals.getEvals(options);
   }
 
   /**
@@ -488,5 +493,17 @@ export class DynamoDBStore extends MastraStorage {
     pagination: StoragePagination;
   }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
     return this.stores.scores.getScoresByScorerId({ scorerId, source, entityId, entityType, pagination });
+  }
+
+  async getScoresBySpan({
+    traceId,
+    spanId,
+    pagination,
+  }: {
+    traceId: string;
+    spanId: string;
+    pagination: StoragePagination;
+  }): Promise<{ pagination: PaginationInfo; scores: ScoreRowData[] }> {
+    return this.stores.scores.getScoresBySpan({ traceId, spanId, pagination });
   }
 }

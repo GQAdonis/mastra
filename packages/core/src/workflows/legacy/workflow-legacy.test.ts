@@ -3,14 +3,12 @@ import path from 'path';
 import { MockLanguageModelV1 } from 'ai/test';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-
-import { Mastra } from '../..';
 import { Agent } from '../../agent';
 import { createLogger } from '../../logger';
+import { Mastra } from '../../mastra';
 import { RuntimeContext } from '../../runtime-context';
 import { TABLE_WORKFLOW_SNAPSHOT } from '../../storage';
 import { MockStore } from '../../storage/mock';
-import { Telemetry } from '../../telemetry';
 import { createTool } from '../../tools';
 
 import { LegacyStep as Step } from './step';
@@ -3169,69 +3167,6 @@ describe('LegacyWorkflow', async () => {
     });
   });
 
-  describe('Accessing Mastra', () => {
-    it('should be able to access the deprecated mastra primitives', async () => {
-      let telemetry: Telemetry | undefined;
-      const step1 = new Step({
-        id: 'step1',
-        execute: async ({ mastra }) => {
-          telemetry = mastra?.telemetry;
-        },
-      });
-
-      const workflow = new LegacyWorkflow({ name: 'test-workflow' });
-      workflow.step(step1).commit();
-
-      const mastra = new Mastra({
-        logger,
-        legacy_workflows: { 'test-workflow': workflow },
-        storage,
-      });
-
-      const wf = mastra.legacy_getWorkflow('test-workflow');
-
-      expect(mastra?.getLogger()).toBe(logger);
-
-      // Access new instance properties directly - should work without warning
-      const run = wf.createRun();
-      await run.start();
-
-      expect(telemetry).toBeDefined();
-      expect(telemetry).toBeInstanceOf(Telemetry);
-    });
-
-    it('should be able to access the new Mastra primitives', async () => {
-      let telemetry: Telemetry | undefined;
-      const step1 = new Step({
-        id: 'step1',
-        execute: async ({ mastra }) => {
-          telemetry = mastra?.getTelemetry();
-        },
-      });
-
-      const workflow = new LegacyWorkflow({ name: 'test-workflow' });
-      workflow.step(step1).commit();
-
-      const mastra = new Mastra({
-        logger,
-        legacy_workflows: { 'test-workflow': workflow },
-        storage,
-      });
-
-      const wf = mastra.legacy_getWorkflow('test-workflow');
-
-      expect(mastra?.getLogger()).toBe(logger);
-
-      // Access new instance properties directly - should work without warning
-      const run = wf.createRun();
-      run.watch(() => {});
-      await run.start();
-
-      expect(telemetry).toBeDefined();
-      expect(telemetry).toBeInstanceOf(Telemetry);
-    });
-  });
-
   describe('Agent as step', () => {
     it('should be able to use an agent as a step', async () => {
       const workflow = new LegacyWorkflow({
@@ -3299,7 +3234,7 @@ describe('LegacyWorkflow', async () => {
         triggerData: { prompt1: 'Capital of France, just the name', prompt2: 'Capital of UK, just the name' },
       });
 
-      console.log(result);
+      result;
 
       expect(result.results['test-agent-1']).toEqual({
         status: 'success',
@@ -4237,7 +4172,7 @@ describe('LegacyWorkflow', async () => {
 
         const run = counterWorkflow.createRun();
         const unwatch = counterWorkflow.watch(state => {
-          console.log('state', JSON.stringify(state.results, null, 2));
+          ('state', JSON.stringify(state.results, null, 2));
         });
         const { results } = await run.start({ triggerData: { startValue: 1 } });
 

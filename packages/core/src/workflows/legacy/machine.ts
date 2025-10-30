@@ -1,13 +1,12 @@
 import EventEmitter from 'node:events';
-import type { Span } from '@opentelemetry/api';
 import { get } from 'radash';
 import sift from 'sift';
 import type { MachineContext, Snapshot } from 'xstate';
 import { assign, createActor, fromPromise, setup } from 'xstate';
 import type { z } from 'zod';
-import type { Mastra } from '../..';
 import type { MastraUnion } from '../../action';
 import type { IMastraLogger } from '../../logger';
+import type { Mastra } from '../../mastra';
 import type { RuntimeContext } from '../../runtime-context';
 import { createMastraProxy } from '../../utils';
 import type { LegacyStep as Step } from './step';
@@ -51,7 +50,6 @@ export class Machine<
   #mastra?: Mastra;
   #runtimeContext: RuntimeContext;
   #workflowInstance: WorkflowInstance;
-  #executionSpan?: Span | undefined;
 
   #stepGraph: StepGraph;
   #machine!: ReturnType<typeof this.initializeMachine>;
@@ -68,7 +66,6 @@ export class Machine<
     mastra,
     runtimeContext,
     workflowInstance,
-    executionSpan,
     name,
     runId,
     steps,
@@ -80,7 +77,6 @@ export class Machine<
     mastra?: Mastra;
     runtimeContext: RuntimeContext;
     workflowInstance: WorkflowInstance;
-    executionSpan?: Span;
     name: string;
     runId: string;
     steps: Record<string, StepNode>;
@@ -93,7 +89,6 @@ export class Machine<
     this.#mastra = mastra;
     this.#workflowInstance = workflowInstance;
     this.#runtimeContext = runtimeContext;
-    this.#executionSpan = executionSpan;
     this.logger = logger;
 
     this.#runId = runId;
@@ -186,8 +181,6 @@ export class Machine<
       if (!this.#actor) {
         this.logger.error('Actor not initialized', { runId: this.#runId });
         const e = new Error('Actor not initialized');
-        this.#executionSpan?.recordException(e);
-        this.#executionSpan?.end();
         reject(e);
         return;
       }
@@ -231,7 +224,6 @@ export class Machine<
           this.logger.debug('All states complete', { runId: this.#runId });
           await this.#workflowInstance.persistWorkflowSnapshot();
           this.#cleanup();
-          this.#executionSpan?.end();
           resolve({
             runId: this.#runId,
             results: isResumedInitialStep ? { ...origSteps, ...state.context.steps } : state.context.steps,
@@ -246,7 +238,6 @@ export class Machine<
           this.logger.debug('Failed to persist final snapshot', { error });
 
           this.#cleanup();
-          this.#executionSpan?.end();
           resolve({
             runId: this.#runId,
             results: isResumedInitialStep ? { ...origSteps, ...state.context.steps } : state.context.steps,
@@ -390,7 +381,7 @@ export class Machine<
               }) satisfies WorkflowContext<TTriggerSchema>['getStepResult'],
             } as WorkflowContext,
             emit: (event: string, ...args: any[]) => {
-              // console.log(this.#workflowInstance.name, 'emitting', event, ...args);
+              // (this.#workflowInstance.name, 'emitting', event, ...args);
               this.emit(event, ...args);
             },
             suspend: async (payload?: any, softSuspend?: any) => {

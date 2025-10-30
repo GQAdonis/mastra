@@ -6,7 +6,6 @@ import type {
   CoreUserMessage as AiCoreUserMessage,
   EmbedManyResult as AiEmbedManyResult,
   EmbedResult as AiEmbedResult,
-  TelemetrySettings,
   streamText,
   streamObject,
   generateText,
@@ -15,14 +14,15 @@ import type {
   StreamTextOnFinishCallback,
   StreamObjectOnFinishCallback,
 } from 'ai';
+import type { SystemModelMessage } from 'ai-v5';
 import type { JSONSchema7 } from 'json-schema';
 import type { z, ZodSchema } from 'zod';
 
-import type { MastraLanguageModel } from '../agent/types';
-import type { AISpan, AISpanType } from '../ai-tracing';
+import type { TracingContext } from '../ai-tracing';
 import type { Run } from '../run/types';
 import type { RuntimeContext } from '../runtime-context';
 import type { CoreTool } from '../tools/types';
+import type { MastraLanguageModel } from './model/shared.types';
 
 export type LanguageModel = MastraLanguageModel;
 
@@ -76,9 +76,20 @@ export type {
   StreamObjectResult,
   StreamTextResult,
 } from './model/base.types';
-export type { TripwireProperties } from './model/shared.types';
+export type { TripwireProperties, MastraModelConfig, OpenAICompatibleConfig } from './model/shared.types';
+export { ModelRouterLanguageModel } from './model/router';
+export { PROVIDER_REGISTRY, parseModelString, getProviderConfig } from './model/provider-registry.js';
+export { resolveModelConfig } from './model/resolve-model';
 
 export type OutputType = StructuredOutput | ZodSchema | JSONSchema7 | undefined;
+
+export type SystemMessage =
+  | string
+  | string[]
+  | CoreSystemMessage
+  | SystemModelMessage
+  | CoreSystemMessage[]
+  | SystemModelMessage[];
 
 type GenerateTextOptions = Parameters<typeof generateText>[0];
 type StreamTextOptions = Parameters<typeof streamText>[0];
@@ -91,7 +102,6 @@ type MastraCustomLLMOptionsKeys =
   | 'model'
   | 'onStepFinish'
   | 'experimental_output'
-  | 'experimental_telemetry'
   | 'messages'
   | 'onFinish'
   | 'output';
@@ -105,11 +115,10 @@ type MastraCustomLLMOptions<Z extends ZodSchema | JSONSchema7 | undefined = unde
   tools?: Record<string, CoreTool>;
   onStepFinish?: (step: unknown) => Promise<void> | void;
   experimental_output?: Z;
-  telemetry?: TelemetrySettings;
   threadId?: string;
   resourceId?: string;
   runtimeContext: RuntimeContext;
-  agentAISpan?: AISpan<AISpanType.AGENT_RUN>;
+  tracingContext: TracingContext;
 } & Run;
 
 export type LLMTextOptions<Z extends ZodSchema | JSONSchema7 | undefined = undefined> = {
@@ -138,3 +147,7 @@ export type LLMStreamObjectOptions<Z extends ZodSchema | JSONSchema7 | undefined
   onFinish?: StreamObjectOnFinishCallback<any>;
 } & LLMInnerStreamOptions<Z> &
   DefaultLLMStreamObjectOptions;
+
+export type { ProviderConfig } from './model/gateways/base';
+
+export { ModelRouterEmbeddingModel, type EmbeddingModelId } from './model';

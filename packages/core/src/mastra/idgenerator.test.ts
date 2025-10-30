@@ -2,176 +2,10 @@ import { MockLanguageModelV1 } from 'ai/test';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { Agent } from '../agent';
 import { MessageList } from '../agent/message-list';
-import type { MastraMessageV2 } from '../agent/types';
 import { MastraError } from '../error';
-import type { StorageThreadType, MemoryConfig, MastraMessageV1 } from '../memory';
-import { MastraMemory } from '../memory/memory';
+import { MockMemory } from '../memory/mock';
 import { RuntimeContext } from '../runtime-context';
-import type { StorageGetMessagesArg, PaginationInfo, ThreadSortOptions } from '../storage';
 import { Mastra } from './index';
-
-// Mock Memory class for testing
-class MockMemory extends MastraMemory {
-  threads: Record<string, StorageThreadType> = {};
-  messages: Map<string, MastraMessageV1> = new Map();
-
-  constructor() {
-    super({ name: 'mock' });
-    Object.defineProperty(this, 'storage', {
-      get: () => ({
-        init: async () => {},
-        getThreadById: this.getThreadById.bind(this),
-        saveThread: async ({ thread }: { thread: StorageThreadType }) => {
-          return this.saveThread({ thread });
-        },
-        getMessages: this.getMessages.bind(this),
-        saveMessages: this.saveMessages.bind(this),
-      }),
-    });
-    this._hasOwnStorage = true;
-  }
-
-  async getThreadById({ threadId }: { threadId: string }): Promise<StorageThreadType | null> {
-    return this.threads[threadId] || null;
-  }
-
-  async saveThread({ thread }: { thread: StorageThreadType; memoryConfig?: MemoryConfig }): Promise<StorageThreadType> {
-    const newThread = { ...thread, updatedAt: new Date() };
-    if (!newThread.createdAt) {
-      newThread.createdAt = new Date();
-    }
-    this.threads[thread.id] = newThread;
-    return this.threads[thread.id];
-  }
-
-  async getMessages({
-    threadId,
-    resourceId,
-    format: _format = 'v1',
-  }: StorageGetMessagesArg & { format?: 'v1' | 'v2' }): Promise<MastraMessageV1[]> {
-    let results = Array.from(this.messages.values());
-    if (threadId) results = results.filter(m => m.threadId === threadId);
-    if (resourceId) results = results.filter(m => m.resourceId === resourceId);
-    return results;
-  }
-
-  async saveMessages(args: {
-    messages: MastraMessageV1[] | MastraMessageV2[] | (MastraMessageV1 | MastraMessageV2)[];
-    memoryConfig?: MemoryConfig | undefined;
-    format?: 'v1' | undefined;
-  }): Promise<MastraMessageV1[]>;
-  async saveMessages(args: {
-    messages: MastraMessageV1[] | MastraMessageV2[] | (MastraMessageV1 | MastraMessageV2)[];
-    memoryConfig?: MemoryConfig | undefined;
-    format: 'v2';
-  }): Promise<MastraMessageV2[]>;
-  async saveMessages(args: {
-    messages: MastraMessageV1[] | MastraMessageV2[] | (MastraMessageV1 | MastraMessageV2)[];
-    memoryConfig?: MemoryConfig | undefined;
-    format?: 'v1' | 'v2';
-  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
-    const { messages } = args as any;
-    for (const msg of messages) {
-      const existing = this.messages.get(msg.id);
-      if (existing) {
-        this.messages.set(msg.id, {
-          ...existing,
-          ...msg,
-          createdAt: existing.createdAt,
-        });
-      } else {
-        this.messages.set(msg.id, msg);
-      }
-    }
-    return messages;
-  }
-
-  async rememberMessages() {
-    return { messages: [], messagesV2: [] };
-  }
-
-  async getThreadsByResourceId() {
-    return [];
-  }
-
-  async query({ threadId, resourceId }: StorageGetMessagesArg) {
-    let results = Array.from(this.messages.values());
-    if (threadId) results = results.filter(m => m.threadId === threadId);
-    if (resourceId) results = results.filter(m => m.resourceId === resourceId);
-
-    // Convert MastraMessageV1 to CoreMessage format
-    const coreMessages = results.map(msg => ({
-      role: msg.role as 'user' | 'assistant' | 'system' | 'tool',
-      content: msg.content,
-    }));
-
-    return { messages: coreMessages as any, uiMessages: [] };
-  }
-
-  async deleteThread() {}
-
-  async getWorkingMemory() {
-    return null;
-  }
-
-  async getWorkingMemoryTemplate() {
-    return null;
-  }
-
-  async getThreadsByResourceIdPaginated(
-    args: { resourceId: string; page: number; perPage: number } & ThreadSortOptions,
-  ): Promise<PaginationInfo & { threads: StorageThreadType[] }> {
-    return {
-      threads: [],
-      total: 0,
-      page: args.page,
-      perPage: args.perPage,
-      hasMore: false,
-    };
-  }
-
-  getMergedThreadConfig(config?: MemoryConfig) {
-    return config || {};
-  }
-
-  async updateWorkingMemory({
-    threadId: _threadId,
-    resourceId: _resourceId,
-    workingMemory: _workingMemory,
-    memoryConfig: _memoryConfig,
-  }: {
-    threadId: string;
-    resourceId?: string;
-    workingMemory: string;
-    memoryConfig?: MemoryConfig;
-  }): Promise<void> {
-    // Mock implementation
-  }
-
-  async __experimental_updateWorkingMemoryVNext({
-    threadId: _threadId,
-    resourceId: _resourceId,
-    workingMemory: _workingMemory,
-    searchString: _searchString,
-    memoryConfig: _memoryConfig,
-  }: {
-    threadId: string;
-    resourceId?: string;
-    workingMemory: string;
-    searchString?: string;
-    memoryConfig?: MemoryConfig;
-  }): Promise<{ success: boolean; reason: string }> {
-    // Mock implementation
-    return { success: true, reason: 'Mock implementation' };
-  }
-
-  async deleteMessages(messageIds: string[]): Promise<void> {
-    // Mock implementation - remove messages by ID
-    for (const messageId of messageIds) {
-      this.messages.delete(messageId);
-    }
-  }
-}
 
 // Helper function to create a Mastra instance with proper memory registration
 function createMastraWithMemory(idGenerator?: () => string) {
@@ -442,7 +276,7 @@ describe('Mastra ID Generator', () => {
     it('should use custom ID generator in agent operations', async () => {
       const { mastra: _mastra, agent } = createMastraWithMemory(customIdGenerator);
 
-      await agent.generate('Hello');
+      await agent.generateLegacy('Hello');
       expect(customIdGenerator).toHaveBeenCalled();
     });
 
@@ -494,8 +328,8 @@ describe('Mastra ID Generator', () => {
         agents: { agent1, agent2 },
       });
 
-      await agent1.generate('Hello from agent 1');
-      await agent2.generate('Hello from agent 2');
+      await agent1.generateLegacy('Hello from agent 1');
+      await agent2.generateLegacy('Hello from agent 2');
 
       expect(customIdGenerator).toHaveBeenCalled();
     });
@@ -503,7 +337,7 @@ describe('Mastra ID Generator', () => {
     it('should use custom ID generator in streaming operations', async () => {
       const { mastra: _mastra, agent } = createMastraWithMemory(customIdGenerator);
 
-      await agent.stream('Hello', {
+      await agent.streamLegacy('Hello', {
         threadId: 'test-thread',
         resourceId: 'test-resource',
       });
@@ -786,7 +620,7 @@ describe('Mastra ID Generator', () => {
       });
 
       // Simulate user conversation
-      await agent.generate('Hello, can you help me?', {
+      await agent.generateLegacy('Hello, can you help me?', {
         threadId: 'user-conversation',
         resourceId: 'user-session',
       });
@@ -826,7 +660,7 @@ describe('Mastra ID Generator', () => {
 
       const results = await Promise.all(
         conversations.map(conv =>
-          agent.generate(conv.message, {
+          agent.generateLegacy(conv.message, {
             threadId: conv.threadId,
             resourceId: conv.resourceId,
           }),
@@ -906,7 +740,7 @@ describe('Mastra ID Generator', () => {
         agents: { streamingAgent: agent },
       });
 
-      await agent.stream('Please provide a streaming response', {
+      await agent.streamLegacy('Please provide a streaming response', {
         threadId: 'streaming-thread',
         resourceId: 'streaming-resource',
       });

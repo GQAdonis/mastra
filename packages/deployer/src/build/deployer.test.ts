@@ -14,7 +14,7 @@ describe('getDeployer', () => {
     ['./plugins/__fixtures__/mastra-with-extra-code.js'],
     ['./plugins/__fixtures__/empty-mastra.js'],
   ])('should be able to extract the deployer from %s', async ([fileName]) => {
-    const bundle = await getDeployerBundler(join(_dirname, fileName), { isDeployerRemoved: false });
+    const bundle = await getDeployerBundler(join(_dirname, fileName), { hasCustomConfig: false });
 
     const result = await bundle.generate({
       format: 'esm',
@@ -25,7 +25,7 @@ describe('getDeployer', () => {
 
   it('should support json imports', async () => {
     const bundle = await getDeployerBundler(join(_dirname, './plugins/__fixtures__/basic-with-json.js'), {
-      isDeployerRemoved: false,
+      hasCustomConfig: false,
     });
 
     const result = await bundle.generate({

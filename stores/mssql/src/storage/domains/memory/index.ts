@@ -15,6 +15,10 @@ import type {
   PaginationArgs,
   StorageResourceType,
   ThreadSortOptions,
+  StorageListMessagesInput,
+  StorageListMessagesOutput,
+  StorageListThreadsByResourceIdInput,
+  StorageListThreadsByResourceIdOutput,
 } from '@mastra/core/storage';
 import sql from 'mssql';
 import type { StoreOperationsMSSQL } from '../operations';
@@ -130,7 +134,8 @@ export class MemoryMSSQL extends MemoryStorage {
       }
 
       const orderByField = orderBy === 'createdAt' ? '[createdAt]' : '[updatedAt]';
-      const dataQuery = `SELECT id, [resourceId], title, metadata, [createdAt], [updatedAt] ${baseQuery} ORDER BY ${orderByField} ${sortDirection} OFFSET @offset ROWS FETCH NEXT @perPage ROWS ONLY`;
+      const dir = (sortDirection || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      const dataQuery = `SELECT id, [resourceId], title, metadata, [createdAt], [updatedAt] ${baseQuery} ORDER BY ${orderByField} ${dir} OFFSET @offset ROWS FETCH NEXT @perPage ROWS ONLY`;
       const dataRequest = this.pool.request();
       dataRequest.input('resourceId', resourceId);
       dataRequest.input('perPage', perPage);
@@ -189,7 +194,12 @@ export class MemoryMSSQL extends MemoryStorage {
       req.input('id', thread.id);
       req.input('resourceId', thread.resourceId);
       req.input('title', thread.title);
-      req.input('metadata', thread.metadata ? JSON.stringify(thread.metadata) : null);
+      const metadata = thread.metadata ? JSON.stringify(thread.metadata) : null;
+      if (metadata === null) {
+        req.input('metadata', sql.NVarChar, null);
+      } else {
+        req.input('metadata', metadata);
+      }
       req.input('createdAt', sql.DateTime2, thread.createdAt);
       req.input('updatedAt', sql.DateTime2, thread.updatedAt);
       await req.query(mergeSql);
@@ -218,7 +228,8 @@ export class MemoryMSSQL extends MemoryStorage {
     try {
       const baseQuery = `FROM ${getTableName({ indexName: TABLE_THREADS, schemaName: getSchemaName(this.schema) })} WHERE [resourceId] = @resourceId`;
       const orderByField = orderBy === 'createdAt' ? '[createdAt]' : '[updatedAt]';
-      const dataQuery = `SELECT id, [resourceId], title, metadata, [createdAt], [updatedAt] ${baseQuery} ORDER BY ${orderByField} ${sortDirection}`;
+      const dir = (sortDirection || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      const dataQuery = `SELECT id, [resourceId], title, metadata, [createdAt], [updatedAt] ${baseQuery} ORDER BY ${orderByField} ${dir}`;
       const request = this.pool.request();
       request.input('resourceId', resourceId);
       const resultSet = await request.query(dataQuery);
@@ -357,6 +368,8 @@ export class MemoryMSSQL extends MemoryStorage {
     selectBy: StorageGetMessagesArg['selectBy'];
     orderByStatement: string;
   }) {
+    if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
     const include = selectBy?.include;
     if (!include) return null;
 
@@ -448,11 +461,14 @@ export class MemoryMSSQL extends MemoryStorage {
       format?: 'v1' | 'v2';
     },
   ): Promise<MastraMessageV1[] | MastraMessageV2[]> {
-    const { threadId, format, selectBy } = args;
+    const { threadId, resourceId, format, selectBy } = args;
+
     const selectStatement = `SELECT seq_id, id, content, role, type, [createdAt], thread_id AS threadId, resourceId`;
     const orderByStatement = `ORDER BY [seq_id] DESC`;
     const limit = resolveMessageLimit({ last: selectBy?.last, defaultLimit: 40 });
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       let rows: any[] = [];
       const include = selectBy?.include || [];
       if (include?.length) {
@@ -494,14 +510,96 @@ export class MemoryMSSQL extends MemoryStorage {
           category: ErrorCategory.THIRD_PARTY,
           details: {
             threadId,
+            resourceId: resourceId ?? '',
           },
         },
         error,
       );
       this.logger?.error?.(mastraError.toString());
-      this.logger?.trackException(mastraError);
+      this.logger?.trackException?.(mastraError);
       return [];
     }
+  }
+
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format: 'v1';
+  }): Promise<MastraMessageV1[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v2';
+  }): Promise<MastraMessageV2[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    if (messageIds.length === 0) return [];
+
+    const selectStatement = `SELECT seq_id, id, content, role, type, [createdAt], thread_id AS threadId, resourceId`;
+    const orderByStatement = `ORDER BY [seq_id] DESC`;
+    try {
+      let rows: any[] = [];
+      let query = `${selectStatement} FROM ${getTableName({ indexName: TABLE_MESSAGES, schemaName: getSchemaName(this.schema) })} WHERE [id] IN (${messageIds.map((_, i) => `@id${i}`).join(', ')})`;
+      const request = this.pool.request();
+      messageIds.forEach((id, i) => request.input(`id${i}`, id));
+
+      query += ` ${orderByStatement}`;
+      const result = await request.query(query);
+      const remainingRows = result.recordset || [];
+      rows.push(...remainingRows);
+      rows.sort((a, b) => {
+        const timeDiff = a.seq_id - b.seq_id;
+        return timeDiff;
+      });
+      rows = rows.map(({ seq_id, ...rest }) => rest);
+      if (format === `v1`) return this._parseAndFormatMessages(rows, format);
+      return this._parseAndFormatMessages(rows, `v2`);
+    } catch (error) {
+      const mastraError = new MastraError(
+        {
+          id: 'MASTRA_STORAGE_MSSQL_STORE_GET_MESSAGES_BY_ID_FAILED',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: {
+            messageIds: JSON.stringify(messageIds),
+          },
+        },
+        error,
+      );
+      this.logger?.error?.(mastraError.toString());
+      this.logger?.trackException?.(mastraError);
+      return [];
+    }
+  }
+
+  public async listMessages(_args: StorageListMessagesInput): Promise<StorageListMessagesOutput> {
+    throw new Error(
+      `listMessages is not yet implemented by this storage adapter (${this.constructor.name}). ` +
+        `This method is currently being rolled out across all storage adapters. ` +
+        `Please use getMessages or getMessagesPaginated as an alternative, or wait for the implementation.`,
+    );
+  }
+
+  public async listMessagesById({ messageIds }: { messageIds: string[] }): Promise<MastraMessageV2[]> {
+    return this.getMessagesById({ messageIds, format: 'v2' });
+  }
+
+  public async listThreadsByResourceId(
+    args: StorageListThreadsByResourceIdInput,
+  ): Promise<StorageListThreadsByResourceIdOutput> {
+    const { resourceId, limit, offset, orderBy, sortDirection } = args;
+    const page = Math.floor(offset / limit);
+    const perPage = limit;
+    return this.getThreadsByResourceIdPaginated({ resourceId, page, perPage, orderBy, sortDirection });
   }
 
   public async getMessagesPaginated(
@@ -509,19 +607,12 @@ export class MemoryMSSQL extends MemoryStorage {
       format?: 'v1' | 'v2';
     },
   ): Promise<PaginationInfo & { messages: MastraMessageV1[] | MastraMessageV2[] }> {
-    const { threadId, selectBy } = args;
-    const { page = 0, perPage: perPageInput } = selectBy?.pagination || {};
-    const orderByStatement = `ORDER BY [seq_id] DESC`;
-    let messages: any[] = [];
-    if (selectBy?.include?.length) {
-      const includeMessages = await this._getIncludedMessages({ threadId, selectBy, orderByStatement });
-      if (includeMessages) {
-        messages.push(...includeMessages);
-      }
-    }
+    const { threadId, resourceId, format, selectBy } = args;
+    const { page = 0, perPage: perPageInput, dateRange } = selectBy?.pagination || {};
+
     try {
-      const { threadId, format, selectBy } = args;
-      const { page = 0, perPage: perPageInput, dateRange } = selectBy?.pagination || {};
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       const fromDate = dateRange?.start;
       const toDate = dateRange?.end;
 
@@ -589,7 +680,7 @@ export class MemoryMSSQL extends MemoryStorage {
       const parsed = this._parseAndFormatMessages(messages, format);
       return {
         messages: parsed,
-        total: total + excludeIds.length,
+        total,
         page,
         perPage,
         hasMore: currentOffset + rows.length < total,
@@ -602,13 +693,14 @@ export class MemoryMSSQL extends MemoryStorage {
           category: ErrorCategory.THIRD_PARTY,
           details: {
             threadId,
+            resourceId: resourceId ?? '',
             page,
           },
         },
         error,
       );
       this.logger?.error?.(mastraError.toString());
-      this.logger?.trackException(mastraError);
+      this.logger?.trackException?.(mastraError);
       return { messages: [], total: 0, page, perPage: perPageInput || 40, hasMore: false };
     }
   }
@@ -918,9 +1010,10 @@ export class MemoryMSSQL extends MemoryStorage {
       }
 
       return {
-        ...result,
-        workingMemory:
-          typeof result.workingMemory === 'object' ? JSON.stringify(result.workingMemory) : result.workingMemory,
+        id: result.id,
+        createdAt: result.createdAt,
+        updatedAt: result.updatedAt,
+        workingMemory: result.workingMemory,
         metadata: typeof result.metadata === 'string' ? JSON.parse(result.metadata) : result.metadata,
       };
     } catch (error) {
@@ -934,7 +1027,7 @@ export class MemoryMSSQL extends MemoryStorage {
         error,
       );
       this.logger?.error?.(mastraError.toString());
-      this.logger?.trackException(mastraError);
+      this.logger?.trackException?.(mastraError);
       throw mastraError;
     }
   }
@@ -944,7 +1037,7 @@ export class MemoryMSSQL extends MemoryStorage {
       tableName: TABLE_RESOURCES,
       record: {
         ...resource,
-        metadata: JSON.stringify(resource.metadata),
+        metadata: resource.metadata,
       },
     });
 
@@ -1017,7 +1110,7 @@ export class MemoryMSSQL extends MemoryStorage {
         error,
       );
       this.logger?.error?.(mastraError.toString());
-      this.logger?.trackException(mastraError);
+      this.logger?.trackException?.(mastraError);
       throw mastraError;
     }
   }

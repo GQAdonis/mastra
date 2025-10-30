@@ -1,5 +1,5 @@
 import { globby } from 'globby';
-import { it, describe, expect, beforeAll } from 'vitest';
+import { it, describe, expect } from 'vitest';
 import * as customResolve from 'resolve.exports';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -11,8 +11,10 @@ let allPackages = await globby(
     '**/package.json',
     '!./examples/**',
     '!./docs/**',
+    '!./docs-new/**',
     '!**/node_modules/**',
     '!**/integration-tests/**',
+    '!**/integration-tests-v5/**',
     '!./packages/_config/**',
     '!./e2e-tests/**',
     '!**/mcp-docs-server/**',

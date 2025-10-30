@@ -1,5 +1,4 @@
 import type { Client, InValue } from '@libsql/client';
-import { parseSqlIdentifier } from '@mastra/core';
 import type { MastraMessageContentV2 } from '@mastra/core/agent';
 import { MessageList } from '@mastra/core/agent';
 import { ErrorCategory, ErrorDomain, MastraError } from '@mastra/core/error';
@@ -9,6 +8,10 @@ import type {
   StorageGetMessagesArg,
   StorageResourceType,
   ThreadSortOptions,
+  StorageListMessagesInput,
+  StorageListMessagesOutput,
+  StorageListThreadsByResourceIdInput,
+  StorageListThreadsByResourceIdOutput,
 } from '@mastra/core/storage';
 import {
   MemoryStorage,
@@ -17,6 +20,7 @@ import {
   TABLE_RESOURCES,
   TABLE_THREADS,
 } from '@mastra/core/storage';
+import { parseSqlIdentifier } from '@mastra/core/utils';
 import type { StoreOperationsLibSQL } from '../operations';
 
 export class MemoryLibSQL extends MemoryStorage {
@@ -54,6 +58,8 @@ export class MemoryLibSQL extends MemoryStorage {
     threadId: string;
     selectBy: StorageGetMessagesArg['selectBy'];
   }) {
+    if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
     const include = selectBy?.include;
     if (!include) return null;
 
@@ -107,12 +113,15 @@ export class MemoryLibSQL extends MemoryStorage {
   public async getMessages(args: StorageGetMessagesArg & { format: 'v2' }): Promise<MastraMessageV2[]>;
   public async getMessages({
     threadId,
+    resourceId,
     selectBy,
     format,
   }: StorageGetMessagesArg & {
     format?: 'v1' | 'v2';
   }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       const messages: MastraMessageV2[] = [];
       const limit = resolveMessageLimit({ last: selectBy?.last, defaultLimit: 40 });
       if (selectBy?.include?.length) {
@@ -153,11 +162,88 @@ export class MemoryLibSQL extends MemoryStorage {
           id: 'LIBSQL_STORE_GET_MESSAGES_FAILED',
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
-          details: { threadId },
+          details: { threadId, resourceId: resourceId ?? '' },
         },
         error,
       );
     }
+  }
+
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format: 'v1';
+  }): Promise<MastraMessageV1[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v2';
+  }): Promise<MastraMessageV2[]>;
+  public async getMessagesById({
+    messageIds,
+    format,
+  }: {
+    messageIds: string[];
+    format?: 'v1' | 'v2';
+  }): Promise<MastraMessageV1[] | MastraMessageV2[]> {
+    if (messageIds.length === 0) return [];
+
+    try {
+      const sql = `
+        SELECT 
+          id, 
+          content, 
+          role, 
+          type,
+          "createdAt", 
+          thread_id,
+          "resourceId"
+        FROM "${TABLE_MESSAGES}"
+        WHERE id IN (${messageIds.map(() => '?').join(', ')})
+        ORDER BY "createdAt" DESC
+      `;
+      const result = await this.client.execute({ sql, args: messageIds });
+      if (!result.rows) return [];
+
+      const list = new MessageList().add(result.rows.map(this.parseRow), 'memory');
+      if (format === `v1`) return list.get.all.v1();
+      return list.get.all.v2();
+    } catch (error) {
+      throw new MastraError(
+        {
+          id: 'LIBSQL_STORE_GET_MESSAGES_BY_ID_FAILED',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { messageIds: JSON.stringify(messageIds) },
+        },
+        error,
+      );
+    }
+  }
+
+  public async listMessages(_args: StorageListMessagesInput): Promise<StorageListMessagesOutput> {
+    throw new Error(
+      `listMessages is not yet implemented by this storage adapter (${this.constructor.name}). ` +
+        `This method is currently being rolled out across all storage adapters. ` +
+        `Please use getMessages or getMessagesPaginated as an alternative, or wait for the implementation.`,
+    );
+  }
+
+  public async listMessagesById({ messageIds }: { messageIds: string[] }): Promise<MastraMessageV2[]> {
+    return this.getMessagesById({ messageIds, format: 'v2' });
+  }
+
+  public async listThreadsByResourceId(
+    args: StorageListThreadsByResourceIdInput,
+  ): Promise<StorageListThreadsByResourceIdOutput> {
+    const { resourceId, limit, offset, orderBy, sortDirection } = args;
+    const page = Math.floor(offset / limit);
+    const perPage = limit;
+    return this.getThreadsByResourceIdPaginated({ resourceId, page, perPage, orderBy, sortDirection });
   }
 
   public async getMessagesPaginated(
@@ -194,6 +280,8 @@ export class MemoryLibSQL extends MemoryStorage {
     }
 
     try {
+      if (!threadId.trim()) throw new Error('threadId must be a non-empty string');
+
       const currentOffset = page * perPage;
 
       const conditions: string[] = [`thread_id = ?`];

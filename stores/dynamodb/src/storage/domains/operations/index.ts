@@ -3,7 +3,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { ErrorCategory, ErrorDomain, MastraError } from '@mastra/core/error';
 import {
   StoreOperations,
-  TABLE_EVALS,
+  TABLE_AI_SPANS,
   TABLE_MESSAGES,
   TABLE_RESOURCES,
   TABLE_SCORERS,
@@ -45,10 +45,10 @@ export class StoreOperationsDynamoDB extends StoreOperations {
       [TABLE_THREADS]: 'thread',
       [TABLE_MESSAGES]: 'message',
       [TABLE_WORKFLOW_SNAPSHOT]: 'workflow_snapshot',
-      [TABLE_EVALS]: 'eval',
       [TABLE_SCORERS]: 'score',
       [TABLE_TRACES]: 'trace',
       [TABLE_RESOURCES]: 'resource',
+      [TABLE_AI_SPANS]: 'ai_span',
     };
     return mapping[tableName] || null;
   }
@@ -291,6 +291,11 @@ export class StoreOperationsDynamoDB extends StoreOperations {
           case 'score':
             // Score entity uses 'id' as its PK
             if (!item.id) throw new Error(`Missing required key 'id' for entity 'score'`);
+            key.id = item.id;
+            break;
+          case 'resource':
+            // Resource entity uses 'id' as its PK
+            if (!item.id) throw new Error(`Missing required key 'id' for entity 'resource'`);
             key.id = item.id;
             break;
           default:

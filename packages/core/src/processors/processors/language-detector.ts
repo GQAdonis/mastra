@@ -2,7 +2,8 @@ import z from 'zod';
 import { Agent } from '../../agent';
 import type { MastraMessageV2 } from '../../agent/message-list';
 import { TripWire } from '../../agent/trip-wire';
-import type { MastraLanguageModel } from '../../agent/types';
+import type { TracingContext } from '../../ai-tracing';
+import type { MastraModelConfig } from '../../llm/model/shared.types';
 import type { Processor } from '../index';
 
 /**
@@ -29,9 +30,9 @@ export interface TranslationResult {
  * Language detection and translation result (simplified for minimal tokens)
  */
 export interface LanguageDetectionResult {
-  iso_code?: string;
-  confidence?: number;
-  translated_text?: string;
+  iso_code: string | null;
+  confidence: number | null;
+  translated_text?: string | null; // Only present when strategy is 'translate'
 }
 
 /**
@@ -39,7 +40,7 @@ export interface LanguageDetectionResult {
  */
 export interface LanguageDetectorOptions {
   /** Model configuration for the detection/translation agent */
-  model: MastraLanguageModel;
+  model: MastraModelConfig;
 
   /**
    * Target language(s) for the project.
@@ -178,9 +179,10 @@ export class LanguageDetector implements Processor {
   async processInput(args: {
     messages: MastraMessageV2[];
     abort: (reason?: string) => never;
+    tracingContext?: TracingContext;
   }): Promise<MastraMessageV2[]> {
     try {
-      const { messages, abort } = args;
+      const { messages, abort, tracingContext } = args;
 
       if (messages.length === 0) {
         return messages;
@@ -197,7 +199,7 @@ export class LanguageDetector implements Processor {
           continue;
         }
 
-        const detectionResult = await this.detectLanguage(textContent);
+        const detectionResult = await this.detectLanguage(textContent, tracingContext);
 
         // Check if confidence meets threshold
         if (detectionResult.confidence && detectionResult.confidence < this.threshold) {
@@ -246,28 +248,57 @@ export class LanguageDetector implements Processor {
   /**
    * Detect language using the internal agent
    */
-  private async detectLanguage(content: string): Promise<LanguageDetectionResult> {
+  private async detectLanguage(content: string, tracingContext?: TracingContext): Promise<LanguageDetectionResult> {
     const prompt = this.createDetectionPrompt(content);
 
     try {
-      const response = await this.detectionAgent.generate(prompt, {
-        output: z.object({
-          iso_code: z.string().optional(),
-          confidence: z.number().min(0).max(1).optional(),
-          translated_text: z.string().optional(),
-        }),
-        temperature: 0,
+      const model = await this.detectionAgent.getModel();
+      let response;
+
+      const baseSchema = z.object({
+        iso_code: z.string().describe('ISO language code').nullable(),
+        confidence: z.number().min(0).max(1).describe('Detection confidence').nullable(),
       });
 
-      if (response.object.translated_text && !response.object.confidence) {
-        response.object.confidence = 0.95;
+      const schema =
+        this.strategy === 'translate'
+          ? baseSchema.extend({
+              translated_text: z.string().describe('Translated text').nullable(),
+            })
+          : baseSchema;
+
+      if (model.specificationVersion === 'v2') {
+        response = await this.detectionAgent.generate(prompt, {
+          structuredOutput: {
+            schema,
+          },
+          modelSettings: {
+            temperature: 0,
+          },
+          tracingContext,
+        });
+      } else {
+        response = await this.detectionAgent.generateLegacy(prompt, {
+          output: schema,
+          temperature: 0,
+          tracingContext,
+        });
       }
 
-      return response.object;
+      const result = response.object as LanguageDetectionResult;
+
+      if (result.translated_text && !result.confidence) {
+        result.confidence = 0.95;
+      }
+
+      return result;
     } catch (error) {
       console.warn('[LanguageDetector] Detection agent failed, assuming target language:', error);
       // Fail open - assume target language if detection fails
-      return {};
+      return {
+        iso_code: null,
+        confidence: null,
+      };
     }
   }
 
@@ -358,7 +389,7 @@ export class LanguageDetector implements Processor {
     result: LanguageDetectionResult,
     originalMessage?: MastraMessageV2,
   ): MastraMessageV2 {
-    const isTargetLanguage = this.isTargetLanguage(result.iso_code);
+    const isTargetLanguage = this.isTargetLanguage(result.iso_code ?? undefined);
 
     const metadata = {
       ...message.content.metadata,

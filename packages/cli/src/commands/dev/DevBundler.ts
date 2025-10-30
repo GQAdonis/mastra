@@ -2,10 +2,12 @@ import { writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FileService } from '@mastra/deployer';
-import { createWatcher, getWatcherInputOptions, writeTelemetryConfig, getBundlerOptions } from '@mastra/deployer/build';
+import { createWatcher, getWatcherInputOptions, getBundlerOptions } from '@mastra/deployer/build';
 import { Bundler } from '@mastra/deployer/bundler';
 import * as fsExtra from 'fs-extra';
-import type { RollupWatcherEvent } from 'rollup';
+import type { Plugin, RollupWatcherEvent } from 'rollup';
+
+import { devLogger } from '../../utils/dev-logger.js';
 
 export class DevBundler extends Bundler {
   private customEnvFile?: string;
@@ -40,7 +42,7 @@ export class DevBundler extends Bundler {
     const __dirname = dirname(__filename);
 
     const playgroundServePath = join(outputDirectory, this.outputDir, 'playground');
-    await fsExtra.copy(join(dirname(__dirname), 'src/playground/dist'), playgroundServePath, {
+    await fsExtra.copy(join(dirname(__dirname), 'dist/playground'), playgroundServePath, {
       overwrite: true,
     });
   }
@@ -56,11 +58,9 @@ export class DevBundler extends Bundler {
     const envFiles = await this.getEnvFiles();
 
     let sourcemapEnabled = false;
-    let transpilePackages: string[] = [];
     try {
       const bundlerOptions = await getBundlerOptions(entryFile, outputDirectory);
       sourcemapEnabled = !!bundlerOptions?.sourcemap;
-      transpilePackages = bundlerOptions?.transpilePackages ?? [];
     } catch (error) {
       this.logger.debug('Failed to get bundler options, sourcemap will be disabled', { error });
     }
@@ -71,27 +71,11 @@ export class DevBundler extends Bundler {
       {
         'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
       },
-      { sourcemap: sourcemapEnabled, transpilePackages },
+      { sourcemap: sourcemapEnabled },
     );
     const toolsInputOptions = await this.getToolsInputOptions(toolsPaths);
 
     const outputDir = join(outputDirectory, this.outputDir);
-    await writeTelemetryConfig({
-      entryFile,
-      outputDir,
-      options: { sourcemap: sourcemapEnabled },
-      logger: this.logger,
-    });
-
-    const mastraFolder = dirname(entryFile);
-    const fileService = new FileService();
-    const customInstrumentation = fileService.getFirstExistingFileOrUndefined([
-      join(mastraFolder, 'instrumentation.js'),
-      join(mastraFolder, 'instrumentation.ts'),
-      join(mastraFolder, 'instrumentation.mjs'),
-    ]);
-
-    await this.writeInstrumentationFile(outputDir, customInstrumentation);
 
     await this.writePackageJson(outputDir, new Map(), {});
 
@@ -112,9 +96,8 @@ export class DevBundler extends Bundler {
           }
         },
         plugins: [
-          // @ts-ignore - types are good
-          // eslint-disable-next-line @typescript-eslint/no-misused-promises
-          ...inputOptions.plugins,
+          // inputOptions.plugins is guaranteed to be Plugin[] by getWatcherInputOptions
+          ...((inputOptions.plugins as Plugin[]) || []),
           {
             name: 'env-watcher',
             buildStart() {
@@ -148,7 +131,7 @@ export class DevBundler extends Bundler {
               await writeFile(
                 join(outputDir, 'tools.mjs'),
                 `${toolImports.join('\n')}
-        
+
                 export const tools = [${toolsExports.join(', ')}]`,
               );
             },
@@ -165,18 +148,18 @@ export class DevBundler extends Bundler {
       },
     );
 
-    this.logger.info('Starting watcher...');
+    devLogger.info('Preparing development environment...');
     return new Promise((resolve, reject) => {
       const cb = (event: RollupWatcherEvent) => {
         if (event.code === 'BUNDLE_END') {
-          this.logger.info('Bundling finished, starting server...');
+          devLogger.success('Initial bundle complete');
           watcher.off('event', cb);
           resolve(watcher);
         }
 
         if (event.code === 'ERROR') {
-          console.log(event);
-          this.logger.error('Bundling failed, stopping watcher...');
+          console.info(event);
+          devLogger.error('Bundling failed - check console for details');
           watcher.off('event', cb);
           reject(event);
         }

@@ -3,10 +3,16 @@ import type { generateText as generateText5 } from 'ai-v5';
 import { convertArrayToReadableStream, mockId, MockLanguageModelV2 } from 'ai-v5/test';
 import { assertType, describe, expect, it } from 'vitest';
 import z from 'zod';
-import { MessageList } from '../../agent/message-list';
 import type { loop } from '../loop';
 import type { LoopOptions } from '../types';
-import { createTestModel, modelWithFiles, modelWithReasoning, modelWithSources, testUsage } from './utils';
+import {
+  createMessageListWithUserMessage,
+  createTestModels,
+  modelWithFiles,
+  modelWithReasoning,
+  modelWithSources,
+  testUsage,
+} from './utils';
 
 export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; runId: string }) {
   const generateText = async (args: Omit<LoopOptions, 'runId'>): ReturnType<typeof generateText5> => {
@@ -34,17 +40,11 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     describe('result.content', () => {
       // TODO: content is not in the correct shape. missing `source` chunks if tool calls are included in stream
       it.todo('should generate content', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'prompt',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
 
         const result = await generateText({
-          model: createTestModel({
+          agentId: 'agent-id',
+          models: createTestModels({
             stream: convertArrayToReadableStream<LanguageModelV2StreamPart>([
               { type: 'text-start', id: '1' },
               { type: 'text-delta', id: '1', delta: 'Hello, world!' },
@@ -161,20 +161,22 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     describe('result.text', () => {
       it('should generate text', async () => {
         const result = await generateText({
-          model: createTestModel(),
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: createTestModels(),
+          messageList: createMessageListWithUserMessage(),
         });
 
         expect(modelWithSources.doGenerateCalls).toMatchSnapshot();
-        expect(result.text).toStrictEqual('Hello, world!');
+        expect(await result.text).toStrictEqual('Hello, world!');
       });
     });
 
     describe('result.reasoningText', () => {
       it('should contain reasoning string from model response', async () => {
         const result = await generateText({
-          model: modelWithReasoning,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithReasoning }],
+          messageList: createMessageListWithUserMessage(),
         });
 
         expect(result.reasoningText).toStrictEqual(
@@ -186,22 +188,24 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     describe('result.sources', () => {
       it('should contain sources', async () => {
         const result = await generateText({
-          model: modelWithSources,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithSources }],
+          messageList: createMessageListWithUserMessage(),
         });
 
-        expect(result.sources).toMatchSnapshot();
+        expect(await result.sources).toMatchSnapshot();
       });
     });
 
     describe('result.files', () => {
       it.todo('should contain files', async () => {
         const result = await generateText({
-          model: modelWithFiles,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithFiles }],
+          messageList: createMessageListWithUserMessage(),
         });
 
-        expect(result.files).toMatchSnapshot();
+        expect(await result.files).toMatchSnapshot();
       });
     });
 
@@ -289,27 +293,29 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
 
       it.todo('should add the reasoning from the model response to the step result', async () => {
         const result = await generateText({
-          model: modelWithReasoning,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithReasoning }],
+          messageList: createMessageListWithUserMessage(),
           _internal: {
             generateId: mockId({ prefix: 'id' }),
             currentDate: () => new Date(0),
           },
         });
 
-        expect(result.steps).toMatchSnapshot();
+        expect(await result.steps).toMatchSnapshot();
       });
 
       it.todo('should contain sources', async () => {
         const result = await generateText({
-          model: modelWithSources,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithSources }],
+          messageList: createMessageListWithUserMessage(),
           _internal: {
             generateId: mockId({ prefix: 'id' }),
             currentDate: () => new Date(0),
           },
         });
-        expect(result.steps).toMatchSnapshot();
+        expect(await result.steps).toMatchSnapshot();
       });
 
       // TODO: include `files` in step result
@@ -317,84 +323,85 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
       // https://github.com/vercel/ai/blob/53569b8e0e5c958db0186009b83ce941a5bc91c1/packages/ai/src/generate-text/generate-text.ts#L540
       it.todo('should contain files', async () => {
         const result = await generateText({
-          model: modelWithFiles,
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithFiles }],
+          messageList: createMessageListWithUserMessage(),
           _internal: {
             generateId: mockId({ prefix: 'id' }),
             currentDate: () => new Date(0),
           },
         });
 
-        expect(result.steps).toMatchSnapshot();
+        expect(await result.steps).toMatchSnapshot();
       });
     });
 
     describe.todo('result.toolCalls', () => {
       it('should contain tool calls', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async ({ prompt, tools, toolChoice }) => {
-              expect(tools).toStrictEqual([
-                {
-                  type: 'function',
-                  name: 'tool1',
-                  description: undefined,
-                  inputSchema: {
-                    $schema: 'http://json-schema.org/draft-07/schema#',
-                    additionalProperties: false,
-                    properties: { value: { type: 'string' } },
-                    required: ['value'],
-                    type: 'object',
-                  },
-                  providerOptions: undefined,
-                },
-                {
-                  type: 'function',
-                  name: 'tool2',
-                  description: undefined,
-                  inputSchema: {
-                    $schema: 'http://json-schema.org/draft-07/schema#',
-                    additionalProperties: false,
-                    properties: { somethingElse: { type: 'string' } },
-                    required: ['somethingElse'],
-                    type: 'object',
-                  },
-                  providerOptions: undefined,
-                },
-              ]);
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doGenerate: async ({ prompt, tools, toolChoice }) => {
+                  expect(tools).toStrictEqual([
+                    {
+                      type: 'function',
+                      name: 'tool1',
+                      description: undefined,
+                      inputSchema: {
+                        $schema: 'http://json-schema.org/draft-07/schema#',
+                        additionalProperties: false,
+                        properties: { value: { type: 'string' } },
+                        required: ['value'],
+                        type: 'object',
+                      },
+                      providerOptions: undefined,
+                    },
+                    {
+                      type: 'function',
+                      name: 'tool2',
+                      description: undefined,
+                      inputSchema: {
+                        $schema: 'http://json-schema.org/draft-07/schema#',
+                        additionalProperties: false,
+                        properties: { somethingElse: { type: 'string' } },
+                        required: ['somethingElse'],
+                        type: 'object',
+                      },
+                      providerOptions: undefined,
+                    },
+                  ]);
 
-              expect(toolChoice).toStrictEqual({ type: 'required' });
+                  expect(toolChoice).toStrictEqual({ type: 'required' });
 
-              expect(prompt).toStrictEqual([
-                {
-                  role: 'user',
-                  content: [{ type: 'text', text: 'test-input' }],
-                  providerOptions: undefined,
+                  expect(prompt).toStrictEqual([
+                    {
+                      role: 'user',
+                      content: [{ type: 'text', text: 'test-input' }],
+                      providerOptions: undefined,
+                    },
+                  ]);
+
+                  return {
+                    ...dummyResponseValues,
+                    content: [
+                      {
+                        type: 'tool-call',
+                        toolCallType: 'function',
+                        toolCallId: 'call-1',
+                        toolName: 'tool1',
+                        input: `{ "value": "value" }`,
+                      },
+                    ],
+                  };
                 },
-              ]);
-
-              return {
-                ...dummyResponseValues,
-                content: [
-                  {
-                    type: 'tool-call',
-                    toolCallType: 'function',
-                    toolCallId: 'call-1',
-                    toolName: 'tool1',
-                    input: `{ "value": "value" }`,
-                  },
-                ],
-              };
+              }),
             },
-          }),
+          ],
           tools: {
             tool1: {
               inputSchema: z.object({ value: z.string() }),
@@ -413,7 +420,7 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
           assertType<string>(result.toolCalls[0].input.value);
         }
 
-        expect(result.toolCalls).toMatchInlineSnapshot(`
+        expect(await result.toolCalls).toMatchInlineSnapshot(`
         [
           {
             "input": {
@@ -432,57 +439,57 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
 
     describe.todo('result.toolResults', () => {
       it('should contain tool results', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async ({ prompt, tools, toolChoice }) => {
-              expect(tools).toStrictEqual([
-                {
-                  type: 'function',
-                  name: 'tool1',
-                  description: undefined,
-                  inputSchema: {
-                    $schema: 'http://json-schema.org/draft-07/schema#',
-                    additionalProperties: false,
-                    properties: { value: { type: 'string' } },
-                    required: ['value'],
-                    type: 'object',
-                  },
-                  providerOptions: undefined,
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doGenerate: async ({ prompt, tools, toolChoice }) => {
+                  expect(tools).toStrictEqual([
+                    {
+                      type: 'function',
+                      name: 'tool1',
+                      description: undefined,
+                      inputSchema: {
+                        $schema: 'http://json-schema.org/draft-07/schema#',
+                        additionalProperties: false,
+                        properties: { value: { type: 'string' } },
+                        required: ['value'],
+                        type: 'object',
+                      },
+                      providerOptions: undefined,
+                    },
+                  ]);
+
+                  expect(toolChoice).toStrictEqual({ type: 'auto' });
+
+                  expect(prompt).toStrictEqual([
+                    {
+                      role: 'user',
+                      content: [{ type: 'text', text: 'test-input' }],
+                      providerOptions: undefined,
+                    },
+                  ]);
+
+                  return {
+                    ...dummyResponseValues,
+                    content: [
+                      {
+                        type: 'tool-call',
+                        toolCallType: 'function',
+                        toolCallId: 'call-1',
+                        toolName: 'tool1',
+                        input: `{ "value": "value" }`,
+                      },
+                    ],
+                  };
                 },
-              ]);
-
-              expect(toolChoice).toStrictEqual({ type: 'auto' });
-
-              expect(prompt).toStrictEqual([
-                {
-                  role: 'user',
-                  content: [{ type: 'text', text: 'test-input' }],
-                  providerOptions: undefined,
-                },
-              ]);
-
-              return {
-                ...dummyResponseValues,
-                content: [
-                  {
-                    type: 'tool-call',
-                    toolCallType: 'function',
-                    toolCallId: 'call-1',
-                    toolName: 'tool1',
-                    input: `{ "value": "value" }`,
-                  },
-                ],
-              };
+              }),
             },
-          }),
+          ],
           tools: {
             tool1: {
               inputSchema: z.object({ value: z.string() }),
@@ -500,7 +507,7 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
           assertType<string>(result.toolResults[0].output);
         }
 
-        expect(result.toolResults).toMatchInlineSnapshot(`
+        expect(await result.toolResults).toMatchInlineSnapshot(`
         [
           {
             "dynamic": false,
@@ -519,31 +526,31 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
 
     describe.todo('result.providerMetadata', () => {
       it('should contain provider metadata', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async () => ({
-              ...dummyResponseValues,
-              content: [],
-              providerMetadata: {
-                exampleProvider: {
-                  a: 10,
-                  b: 20,
-                },
-              },
-            }),
-          }),
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doGenerate: async () => ({
+                  ...dummyResponseValues,
+                  content: [],
+                  providerMetadata: {
+                    exampleProvider: {
+                      a: 10,
+                      b: 20,
+                    },
+                  },
+                }),
+              }),
+            },
+          ],
           messageList,
         });
 
-        expect(result.providerMetadata).toStrictEqual({
+        expect(await result.providerMetadata).toStrictEqual({
           exampleProvider: {
             a: 10,
             b: 20,
@@ -554,21 +561,27 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
 
     describe.todo('result.response.messages', () => {
       it('should contain assistant response message when there are no tool calls', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
+
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async () => ({
-              ...dummyResponseValues,
-              content: [{ type: 'text', text: 'Hello, world!' }],
-            }),
-          }),
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doStream: async ({}) => ({
+                  ...dummyResponseValues,
+                  stream: convertArrayToReadableStream<LanguageModelV2StreamPart>([
+                    { type: 'text-start', id: '1' },
+                    { type: 'text-delta', id: '1', delta: 'Hello, world!' },
+                    { type: 'text-end', id: '1' },
+                    { type: 'finish', finishReason: 'stop', usage: testUsage },
+                  ]),
+                }),
+              }),
+            },
+          ],
           messageList,
         });
 
@@ -576,30 +589,30 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
       });
 
       it('should contain assistant response message and tool message when there are tool calls with results', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async () => ({
-              ...dummyResponseValues,
-              content: [
-                { type: 'text', text: 'Hello, world!' },
-                {
-                  type: 'tool-call',
-                  toolCallType: 'function',
-                  toolCallId: 'call-1',
-                  toolName: 'tool1',
-                  input: `{ "value": "value" }`,
-                },
-              ],
-            }),
-          }),
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doGenerate: async () => ({
+                  ...dummyResponseValues,
+                  content: [
+                    { type: 'text', text: 'Hello, world!' },
+                    {
+                      type: 'tool-call',
+                      toolCallType: 'function',
+                      toolCallId: 'call-1',
+                      toolName: 'tool1',
+                      input: `{ "value": "value" }`,
+                    },
+                  ],
+                }),
+              }),
+            },
+          ],
           tools: {
             tool1: {
               inputSchema: z.object({ value: z.string() }),
@@ -617,16 +630,10 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
       });
 
       it('should contain reasoning', async () => {
-        const messageList = new MessageList();
-        messageList.add(
-          {
-            role: 'user',
-            content: 'test-input',
-          },
-          'input',
-        );
+        const messageList = createMessageListWithUserMessage();
         const result = await generateText({
-          model: modelWithReasoning,
+          agentId: 'agent-id',
+          models: [{ maxRetries: 0, id: 'test-model', model: modelWithReasoning }],
           messageList,
         });
 
@@ -634,50 +641,165 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
       });
     });
 
-    describe.todo('result.request', () => {
+    describe('result.request', () => {
       it('should contain request body', async () => {
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async ({}) => ({
-              ...dummyResponseValues,
-              content: [{ type: 'text', text: 'Hello, world!' }],
-              request: {
-                body: 'test body',
-              },
-            }),
-          }),
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doStream: async ({}) => ({
+                  ...dummyResponseValues,
+                  stream: convertArrayToReadableStream<LanguageModelV2StreamPart>([
+                    { type: 'text-start', id: '1' },
+                    { type: 'text-delta', id: '1', delta: 'Hello, world!' },
+                    { type: 'text-end', id: '1' },
+                    { type: 'finish', finishReason: 'stop', usage: testUsage },
+                  ]),
+                  request: {
+                    body: 'test body',
+                  },
+                }),
+              }),
+            },
+          ],
+          messageList: createMessageListWithUserMessage(),
         });
 
-        expect(result.request).toStrictEqual({
+        expect(await result.request).toStrictEqual({
           body: 'test body',
         });
       });
     });
 
-    describe.todo('result.response', () => {
+    describe('result.response', () => {
       it('should contain response body and headers', async () => {
         const result = await generateText({
-          model: new MockLanguageModelV2({
-            doGenerate: async ({}) => ({
-              ...dummyResponseValues,
-              content: [{ type: 'text', text: 'Hello, world!' }],
-              response: {
-                id: 'test-id-from-model',
-                timestamp: new Date(10000),
-                modelId: 'test-response-model-id',
-                headers: {
-                  'custom-response-header': 'response-header-value',
-                },
-                body: 'test body',
-              },
-            }),
-          }),
-          messageList: new MessageList(),
+          agentId: 'agent-id',
+          models: [
+            {
+              maxRetries: 0,
+              id: 'test-model',
+              model: new MockLanguageModelV2({
+                doStream: async ({}) => ({
+                  ...dummyResponseValues,
+                  stream: convertArrayToReadableStream<LanguageModelV2StreamPart>([
+                    { type: 'text-start', id: '1' },
+                    { type: 'text-delta', id: '1', delta: 'Hello, world!' },
+                    { type: 'text-end', id: '1' },
+                    { type: 'finish', finishReason: 'stop', usage: testUsage },
+                  ]),
+                  response: {
+                    id: 'test-id-from-model',
+                    timestamp: new Date(10000),
+                    modelId: 'test-response-model-id',
+                    modelProvider: 'mock-provider',
+                    modelVersion: 'v2',
+                    headers: {
+                      'custom-response-header': 'response-header-value',
+                    },
+                    body: 'test body',
+                  },
+                }),
+              }),
+            },
+          ],
+          _internal: { generateId: () => '1234', currentDate: () => new Date(0), now: () => 0 },
+          messageList: createMessageListWithUserMessage(),
         });
 
-        expect(result.steps?.[0]?.response).toMatchSnapshot();
-        expect(result.response).toMatchSnapshot();
+        expect(result.steps?.[0]?.response).toMatchInlineSnapshot(`
+          {
+            "body": "test body",
+            "headers": {
+              "custom-response-header": "response-header-value",
+            },
+            "id": "test-id-from-model",
+            "messages": [
+              {
+                "content": [
+                  {
+                    "text": "Hello, world!",
+                    "type": "text",
+                  },
+                ],
+                "role": "assistant",
+              },
+            ],
+            "modelId": "test-response-model-id",
+            "modelMetadata": {
+              "modelId": "mock-model-id",
+              "modelProvider": "mock-provider",
+              "modelVersion": "v2",
+            },
+            "modelProvider": "mock-provider",
+            "modelVersion": "v2",
+            "timestamp": 1970-01-01T00:00:10.000Z,
+            "uiMessages": [
+              {
+                "id": "1234",
+                "metadata": {
+                  "__originalContent": "Hello, world!",
+                  "createdAt": 2024-01-01T00:00:00.001Z,
+                },
+                "parts": [
+                  {
+                    "text": "Hello, world!",
+                    "type": "text",
+                  },
+                ],
+                "role": "assistant",
+              },
+            ],
+          }
+        `);
+        expect(await result.response).toMatchInlineSnapshot(`
+          {
+            "body": "test body",
+            "headers": {
+              "custom-response-header": "response-header-value",
+            },
+            "id": "test-id-from-model",
+            "messages": [
+              {
+                "content": [
+                  {
+                    "text": "Hello, world!",
+                    "type": "text",
+                  },
+                ],
+                "role": "assistant",
+              },
+            ],
+            "modelId": "test-response-model-id",
+            "modelMetadata": {
+              "modelId": "mock-model-id",
+              "modelProvider": "mock-provider",
+              "modelVersion": "v2",
+            },
+            "modelProvider": "mock-provider",
+            "modelVersion": "v2",
+            "timestamp": 1970-01-01T00:00:10.000Z,
+            "uiMessages": [
+              {
+                "id": "1234",
+                "metadata": {
+                  "__originalContent": "Hello, world!",
+                  "createdAt": 2024-01-01T00:00:00.001Z,
+                },
+                "parts": [
+                  {
+                    "text": "Hello, world!",
+                    "type": "text",
+                  },
+                ],
+                "role": "assistant",
+              },
+            ],
+          }
+        `);
       });
     });
 
@@ -1099,6 +1221,8 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     //                   },
     //                 ],
     //                 "modelId": "test-response-model-id",
+    //                 "modelProvider": "mock-provider",
+    //                 "modelVersion": "v2",
     //                 "timestamp": 1970-01-01T00:00:10.000Z,
     //               },
     //               "usage": {
@@ -1281,6 +1405,8 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     //                   },
     //                 ],
     //                 "modelId": "test-response-model-id",
+    //                 "modelProvider": "mock-provider",
+    //                 "modelVersion": "v2",
     //                 "timestamp": 1970-01-01T00:00:10.000Z,
     //               },
     //               "usage": {
@@ -1851,170 +1977,6 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     //   });
     // });
 
-    // describe.todo('telemetry', () => {
-    //   let tracer: MockTracer;
-
-    //   beforeEach(() => {
-    //     tracer = new MockTracer();
-    //   });
-
-    //   it('should not record any telemetry data when not explicitly enabled', async () => {
-    //     await generateText({
-    //       model: new MockLanguageModelV2({
-    //         doGenerate: async ({}) => ({
-    //           ...dummyResponseValues,
-    //           content: [{ type: 'text', text: 'Hello, world!' }],
-    //         }),
-    //       }),
-    //       prompt: 'prompt',
-    //       experimental_telemetry: { tracer },
-    //     });
-
-    //     expect(tracer.jsonSpans).toMatchSnapshot();
-    //   });
-
-    //   it('should record telemetry data when enabled', async () => {
-    //     await generateText({
-    //       model: new MockLanguageModelV2({
-    //         doGenerate: async ({}) => ({
-    //           ...dummyResponseValues,
-    //           content: [{ type: 'text', text: 'Hello, world!' }],
-    //           response: {
-    //             id: 'test-id-from-model',
-    //             timestamp: new Date(10000),
-    //             modelId: 'test-response-model-id',
-    //           },
-    //           providerMetadata: {
-    //             testProvider: {
-    //               testKey: 'testValue',
-    //             },
-    //           },
-    //         }),
-    //       }),
-    //       prompt: 'prompt',
-    //       topK: 0.1,
-    //       topP: 0.2,
-    //       frequencyPenalty: 0.3,
-    //       presencePenalty: 0.4,
-    //       temperature: 0.5,
-    //       stopSequences: ['stop'],
-    //       headers: {
-    //         header1: 'value1',
-    //         header2: 'value2',
-    //       },
-    //       experimental_telemetry: {
-    //         isEnabled: true,
-    //         functionId: 'test-function-id',
-    //         metadata: {
-    //           test1: 'value1',
-    //           test2: false,
-    //         },
-    //         tracer,
-    //       },
-    //     });
-
-    //     expect(tracer.jsonSpans).toMatchSnapshot();
-    //   });
-
-    //   it('should record successful tool call', async () => {
-    //     await generateText({
-    //       model: new MockLanguageModelV2({
-    //         doGenerate: async ({}) => ({
-    //           ...dummyResponseValues,
-    //           content: [
-    //             {
-    //               type: 'tool-call',
-    //               toolCallType: 'function',
-    //               toolCallId: 'call-1',
-    //               toolName: 'tool1',
-    //               input: `{ "value": "value" }`,
-    //             },
-    //           ],
-    //         }),
-    //       }),
-    //       tools: {
-    //         tool1: {
-    //           inputSchema: z.object({ value: z.string() }),
-    //           execute: async () => 'result1',
-    //         },
-    //       },
-    //       prompt: 'test-input',
-    //       experimental_telemetry: {
-    //         isEnabled: true,
-    //         tracer,
-    //       },
-    //       _internal: {
-    //         generateId: () => 'test-id',
-    //         currentDate: () => new Date(0),
-    //       },
-    //     });
-
-    //     expect(tracer.jsonSpans).toMatchInlineSnapshot(`
-    //     [
-    //       {
-    //         "attributes": {
-    //           "ai.model.id": "mock-model-id",
-    //           "ai.model.provider": "mock-provider",
-    //           "ai.operationId": "ai.generateText",
-    //           "ai.prompt": "{"prompt":"test-input"}",
-    //           "ai.response.finishReason": "stop",
-    //           "ai.response.toolCalls": "[{"toolCallId":"call-1","toolName":"tool1","input":"{ \\"value\\": \\"value\\" }"}]",
-    //           "ai.settings.maxRetries": 2,
-    //           "ai.usage.completionTokens": 10,
-    //           "ai.usage.promptTokens": 3,
-    //           "operation.name": "ai.generateText",
-    //         },
-    //         "events": [],
-    //         "name": "ai.generateText",
-    //       },
-    //       {
-    //         "attributes": {
-    //           "ai.model.id": "mock-model-id",
-    //           "ai.model.provider": "mock-provider",
-    //           "ai.operationId": "ai.generateText.doGenerate",
-    //           "ai.prompt.messages": "[{"role":"user","content":[{"type":"text","text":"test-input"}]}]",
-    //           "ai.prompt.toolChoice": "{"type":"auto"}",
-    //           "ai.prompt.tools": [
-    //             "{"type":"function","name":"tool1","inputSchema":{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}}",
-    //           ],
-    //           "ai.response.finishReason": "stop",
-    //           "ai.response.id": "test-id",
-    //           "ai.response.model": "mock-model-id",
-    //           "ai.response.timestamp": "1970-01-01T00:00:00.000Z",
-    //           "ai.response.toolCalls": "[{"toolCallId":"call-1","toolName":"tool1","input":"{ \\"value\\": \\"value\\" }"}]",
-    //           "ai.settings.maxRetries": 2,
-    //           "ai.usage.completionTokens": 10,
-    //           "ai.usage.promptTokens": 3,
-    //           "gen_ai.request.model": "mock-model-id",
-    //           "gen_ai.response.finish_reasons": [
-    //             "stop",
-    //           ],
-    //           "gen_ai.response.id": "test-id",
-    //           "gen_ai.response.model": "mock-model-id",
-    //           "gen_ai.system": "mock-provider",
-    //           "gen_ai.usage.input_tokens": 3,
-    //           "gen_ai.usage.output_tokens": 10,
-    //           "operation.name": "ai.generateText.doGenerate",
-    //         },
-    //         "events": [],
-    //         "name": "ai.generateText.doGenerate",
-    //       },
-    //       {
-    //         "attributes": {
-    //           "ai.operationId": "ai.toolCall",
-    //           "ai.toolCall.args": "{"value":"value"}",
-    //           "ai.toolCall.id": "call-1",
-    //           "ai.toolCall.name": "tool1",
-    //           "ai.toolCall.result": ""result1"",
-    //           "operation.name": "ai.toolCall",
-    //         },
-    //         "events": [],
-    //         "name": "ai.toolCall",
-    //       },
-    //     ]
-    //   `);
-    //   });
-
     //   it('should record error on tool call', async () => {
     //     await generateText({
     //       model: new MockLanguageModelV2({
@@ -2040,10 +2002,6 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     //         },
     //       },
     //       prompt: 'test-input',
-    //       experimental_telemetry: {
-    //         isEnabled: true,
-    //         tracer,
-    //       },
     //       _internal: {
     //         generateId: () => 'test-id',
     //         currentDate: () => new Date(0),
@@ -2074,45 +2032,6 @@ export function generateTextTestsV5({ loopFn, runId }: { loopFn: typeof loop; ru
     //     expect(exceptionEvent.attributes?.['exception.stack']).toContain('Tool execution failed');
     //     expect(exceptionEvent.time).toEqual([0, 0]);
     //   });
-
-    //   it('should not record telemetry inputs / outputs when disabled', async () => {
-    //     await generateText({
-    //       model: new MockLanguageModelV2({
-    //         doGenerate: async ({}) => ({
-    //           ...dummyResponseValues,
-    //           content: [
-    //             {
-    //               type: 'tool-call',
-    //               toolCallType: 'function',
-    //               toolCallId: 'call-1',
-    //               toolName: 'tool1',
-    //               input: `{ "value": "value" }`,
-    //             },
-    //           ],
-    //         }),
-    //       }),
-    //       tools: {
-    //         tool1: {
-    //           inputSchema: z.object({ value: z.string() }),
-    //           execute: async () => 'result1',
-    //         },
-    //       },
-    //       prompt: 'test-input',
-    //       experimental_telemetry: {
-    //         isEnabled: true,
-    //         recordInputs: false,
-    //         recordOutputs: false,
-    //         tracer,
-    //       },
-    //       _internal: {
-    //         generateId: () => 'test-id',
-    //         currentDate: () => new Date(0),
-    //       },
-    //     });
-
-    //     expect(tracer.jsonSpans).toMatchSnapshot();
-    //   });
-    // });
 
     // describe.todo('tool callbacks', () => {
     //   it('should invoke callbacks in the correct order', async () => {

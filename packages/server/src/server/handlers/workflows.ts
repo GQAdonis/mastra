@@ -1,63 +1,30 @@
-import { ReadableStream } from 'node:stream/web';
+import { ReadableStream, TransformStream } from 'node:stream/web';
+import type { TracingOptions } from '@mastra/core/ai-tracing';
 import type { RuntimeContext } from '@mastra/core/di';
 import type { WorkflowRuns } from '@mastra/core/storage';
-import type { Workflow, SerializedStepFlowEntry, WatchEvent, StepWithComponent } from '@mastra/core/workflows';
-import { stringify } from 'superjson';
-import zodToJsonSchema from 'zod-to-json-schema';
+import type {
+  Workflow,
+  WatchEvent,
+  WorkflowInfo,
+  ChunkType,
+  WorkflowStreamEvent,
+  StreamEvent,
+} from '@mastra/core/workflows';
 import { HTTPException } from '../http-exception';
 import type { Context } from '../types';
+import { getWorkflowInfo, WorkflowRegistry } from '../utils';
 import { handleError } from './error';
 
-interface WorkflowContext extends Context {
+export interface WorkflowContext extends Context {
   workflowId?: string;
   runId?: string;
-}
-
-function getSteps(steps: Record<string, StepWithComponent>, path?: string) {
-  return Object.entries(steps).reduce<any>((acc, [key, step]) => {
-    const fullKey = path ? `${path}.${key}` : key;
-    acc[fullKey] = {
-      id: step.id,
-      description: step.description,
-      inputSchema: step.inputSchema ? stringify(zodToJsonSchema(step.inputSchema)) : undefined,
-      outputSchema: step.outputSchema ? stringify(zodToJsonSchema(step.outputSchema)) : undefined,
-      resumeSchema: step.resumeSchema ? stringify(zodToJsonSchema(step.resumeSchema)) : undefined,
-      suspendSchema: step.suspendSchema ? stringify(zodToJsonSchema(step.suspendSchema)) : undefined,
-      isWorkflow: step.component === 'WORKFLOW',
-    };
-
-    if (step.component === 'WORKFLOW' && step.steps) {
-      const nestedSteps = getSteps(step.steps, fullKey) || {};
-      acc = { ...acc, ...nestedSteps };
-    }
-
-    return acc;
-  }, {});
 }
 
 export async function getWorkflowsHandler({ mastra }: WorkflowContext) {
   try {
     const workflows = mastra.getWorkflows({ serialized: false });
-    const _workflows = Object.entries(workflows).reduce<any>((acc, [key, workflow]) => {
-      acc[key] = {
-        name: workflow.name,
-        description: workflow.description,
-        steps: Object.entries(workflow.steps).reduce<any>((acc, [key, step]) => {
-          acc[key] = {
-            id: step.id,
-            description: step.description,
-            inputSchema: step.inputSchema ? stringify(zodToJsonSchema(step.inputSchema)) : undefined,
-            outputSchema: step.outputSchema ? stringify(zodToJsonSchema(step.outputSchema)) : undefined,
-            resumeSchema: step.resumeSchema ? stringify(zodToJsonSchema(step.resumeSchema)) : undefined,
-            suspendSchema: step.suspendSchema ? stringify(zodToJsonSchema(step.suspendSchema)) : undefined,
-          };
-          return acc;
-        }, {}),
-        allSteps: getSteps(workflow.steps) || {},
-        stepGraph: workflow.serializedStepGraph,
-        inputSchema: workflow.inputSchema ? stringify(zodToJsonSchema(workflow.inputSchema)) : undefined,
-        outputSchema: workflow.outputSchema ? stringify(zodToJsonSchema(workflow.outputSchema)) : undefined,
-      };
+    const _workflows = Object.entries(workflows).reduce<Record<string, WorkflowInfo>>((acc, [key, workflow]) => {
+      acc[key] = getWorkflowInfo(workflow);
       return acc;
     }, {});
     return _workflows;
@@ -65,15 +32,6 @@ export async function getWorkflowsHandler({ mastra }: WorkflowContext) {
     return handleError(error, 'Error getting workflows');
   }
 }
-
-type SerializedStep = {
-  id: string;
-  description: string;
-  inputSchema: string | undefined;
-  outputSchema: string | undefined;
-  resumeSchema: string | undefined;
-  suspendSchema: string | undefined;
-};
 
 async function getWorkflowsFromSystem({ mastra, workflowId }: WorkflowContext) {
   const logger = mastra.getLogger();
@@ -84,10 +42,15 @@ async function getWorkflowsFromSystem({ mastra, workflowId }: WorkflowContext) {
 
   let workflow;
 
-  try {
-    workflow = mastra.getWorkflow(workflowId);
-  } catch (error) {
-    logger.debug('Error getting workflow, searching agents for workflow', error);
+  // First check registry for temporary workflows
+  workflow = WorkflowRegistry.getWorkflow(workflowId);
+
+  if (!workflow) {
+    try {
+      workflow = mastra.getWorkflow(workflowId);
+    } catch (error) {
+      logger.debug('Error getting workflow, searching agents for workflow', error);
+    }
   }
 
   if (!workflow) {
@@ -118,15 +81,7 @@ async function getWorkflowsFromSystem({ mastra, workflowId }: WorkflowContext) {
   return { workflow };
 }
 
-export async function getWorkflowByIdHandler({ mastra, workflowId }: WorkflowContext): Promise<{
-  steps: Record<string, SerializedStep>;
-  allSteps: Record<string, SerializedStep>;
-  name: string | undefined;
-  description: string | undefined;
-  stepGraph: SerializedStepFlowEntry[];
-  inputSchema: string | undefined;
-  outputSchema: string | undefined;
-}> {
+export async function getWorkflowByIdHandler({ mastra, workflowId }: WorkflowContext): Promise<WorkflowInfo> {
   try {
     if (!workflowId) {
       throw new HTTPException(400, { message: 'Workflow ID is required' });
@@ -138,25 +93,7 @@ export async function getWorkflowByIdHandler({ mastra, workflowId }: WorkflowCon
       throw new HTTPException(404, { message: 'Workflow not found' });
     }
 
-    return {
-      steps: Object.entries(workflow.steps).reduce<any>((acc, [key, step]) => {
-        acc[key] = {
-          id: step.id,
-          description: step.description,
-          inputSchema: step.inputSchema ? stringify(zodToJsonSchema(step.inputSchema)) : undefined,
-          outputSchema: step.outputSchema ? stringify(zodToJsonSchema(step.outputSchema)) : undefined,
-          resumeSchema: step.resumeSchema ? stringify(zodToJsonSchema(step.resumeSchema)) : undefined,
-          suspendSchema: step.suspendSchema ? stringify(zodToJsonSchema(step.suspendSchema)) : undefined,
-        };
-        return acc;
-      }, {}),
-      allSteps: getSteps(workflow.steps) || {},
-      name: workflow.name,
-      description: workflow.description,
-      stepGraph: workflow.serializedStepGraph,
-      inputSchema: workflow.inputSchema ? stringify(zodToJsonSchema(workflow.inputSchema)) : undefined,
-      outputSchema: workflow.outputSchema ? stringify(zodToJsonSchema(workflow.outputSchema)) : undefined,
-    };
+    return getWorkflowInfo(workflow);
   } catch (error) {
     return handleError(error, 'Error getting workflow');
   }
@@ -256,9 +193,11 @@ export async function startAsyncWorkflowHandler({
   workflowId,
   runId,
   inputData,
+  tracingOptions,
 }: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
   inputData?: unknown;
   runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
 }) {
   try {
     if (!workflowId) {
@@ -275,6 +214,7 @@ export async function startAsyncWorkflowHandler({
     const result = await _run.start({
       inputData,
       runtimeContext,
+      tracingOptions,
     });
     return result;
   } catch (error) {
@@ -288,9 +228,11 @@ export async function startWorkflowRunHandler({
   workflowId,
   runId,
   inputData,
+  tracingOptions,
 }: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
   inputData?: unknown;
   runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
 }) {
   try {
     if (!workflowId) {
@@ -313,10 +255,11 @@ export async function startWorkflowRunHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
     void _run.start({
       inputData,
       runtimeContext,
+      tracingOptions,
     });
 
     return { message: 'Workflow run started' };
@@ -329,7 +272,10 @@ export async function watchWorkflowHandler({
   mastra,
   workflowId,
   runId,
-}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'>): Promise<ReadableStream<string>> {
+  eventType = 'watch',
+}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
+  eventType?: 'watch' | 'watch-v2';
+}): Promise<ReadableStream<string>> {
   try {
     if (!workflowId) {
       throw new HTTPException(400, { message: 'Workflow ID is required' });
@@ -351,30 +297,56 @@ export async function watchWorkflowHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
     let unwatch: () => void;
     let asyncRef: NodeJS.Immediate | null = null;
     const stream = new ReadableStream<string>({
       start(controller) {
-        unwatch = _run.watch(({ type, payload, eventTimestamp }) => {
-          controller.enqueue(JSON.stringify({ type, payload, eventTimestamp, runId }));
+        if (eventType === 'watch') {
+          unwatch = _run.watch((event: WatchEvent) => {
+            const { type, payload, eventTimestamp } = event;
+            controller.enqueue(JSON.stringify({ type, payload, eventTimestamp, runId }));
 
-          if (asyncRef) {
-            clearImmediate(asyncRef);
-            asyncRef = null;
-          }
-
-          // a run is finished if the status is not running
-          asyncRef = setImmediate(async () => {
-            const runDone = payload.workflowState.status !== 'running';
-            if (runDone) {
-              controller.close();
-              unwatch?.();
+            if (asyncRef) {
+              clearImmediate(asyncRef);
+              asyncRef = null;
             }
-          });
-        });
+
+            // a run is finished if the status is not running
+            asyncRef = setImmediate(async () => {
+              const runDone = (payload as WatchEvent['payload']).workflowState?.status !== 'running';
+              if (runDone) {
+                controller.close();
+                unwatch?.();
+              }
+            });
+          }, eventType);
+        } else {
+          unwatch = _run.watch((event: WorkflowStreamEvent) => {
+            const { type, payload } = event;
+            controller.enqueue(JSON.stringify({ type, payload, runId }));
+
+            if (asyncRef) {
+              clearImmediate(asyncRef);
+              asyncRef = null;
+            }
+
+            // a run is finished if the status is not running
+            asyncRef = setImmediate(async () => {
+              const runDone = type === 'workflow-finish';
+              if (runDone) {
+                controller.close();
+                unwatch?.();
+              }
+            });
+          }, eventType);
+        }
       },
       cancel() {
+        if (asyncRef) {
+          clearImmediate(asyncRef);
+          asyncRef = null;
+        }
         unwatch?.();
       },
     });
@@ -391,9 +363,26 @@ export async function streamWorkflowHandler({
   workflowId,
   runId,
   inputData,
+  tracingOptions,
 }: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
   inputData?: unknown;
   runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
+}) {
+  return streamVNextWorkflowHandler({ mastra, workflowId, runId, inputData, runtimeContext, tracingOptions });
+}
+
+export async function streamLegacyWorkflowHandler({
+  mastra,
+  runtimeContext,
+  workflowId,
+  runId,
+  inputData,
+  tracingOptions,
+}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
+  inputData?: unknown;
+  runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
 }) {
   try {
     if (!workflowId) {
@@ -410,15 +399,84 @@ export async function streamWorkflowHandler({
       throw new HTTPException(404, { message: 'Workflow not found' });
     }
 
+    const serverCache = mastra.getServerCache();
+
     const run = await workflow.createRunAsync({ runId });
-    const result = run.stream({
+    const result = run.streamLegacy({
       inputData,
       runtimeContext,
+      onChunk: async chunk => {
+        if (serverCache) {
+          const cacheKey = runId;
+          await serverCache.listPush(cacheKey, chunk);
+        }
+      },
+      tracingOptions,
     });
+
     return result;
   } catch (error) {
     return handleError(error, 'Error executing workflow');
   }
+}
+
+export async function observeStreamLegacyWorkflowHandler({
+  mastra,
+  workflowId,
+  runId,
+}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'>) {
+  try {
+    if (!workflowId) {
+      throw new HTTPException(400, { message: 'Workflow ID is required' });
+    }
+
+    if (!runId) {
+      throw new HTTPException(400, { message: 'runId required to observe workflow stream' });
+    }
+
+    const { workflow } = await getWorkflowsFromSystem({ mastra, workflowId });
+
+    if (!workflow) {
+      throw new HTTPException(404, { message: 'Workflow not found' });
+    }
+
+    const run = await workflow.getWorkflowRunById(runId);
+
+    if (!run) {
+      throw new HTTPException(404, { message: 'Workflow run not found' });
+    }
+
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
+    const serverCache = mastra.getServerCache();
+    if (!serverCache) {
+      throw new HTTPException(500, { message: 'Server cache not found' });
+    }
+
+    const transformStream = new TransformStream<StreamEvent, StreamEvent>();
+
+    const writer = transformStream.writable.getWriter();
+
+    const cachedRunChunks = await serverCache.listFromTo(runId, 0);
+
+    for (const chunk of cachedRunChunks) {
+      await writer.write(chunk as any);
+    }
+
+    writer.releaseLock();
+
+    const result = _run.observeStreamLegacy();
+    return result.stream?.pipeThrough(transformStream);
+  } catch (error) {
+    return handleError(error, 'Error observing workflow stream');
+  }
+}
+
+export async function observeStreamWorkflowHandler({
+  mastra,
+  workflowId,
+  runId,
+}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'>) {
+  return observeStreamVNextWorkflowHandler({ mastra, workflowId, runId });
 }
 
 export async function streamVNextWorkflowHandler({
@@ -427,9 +485,13 @@ export async function streamVNextWorkflowHandler({
   workflowId,
   runId,
   inputData,
+  closeOnSuspend,
+  tracingOptions,
 }: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'> & {
   inputData?: unknown;
   runtimeContext?: RuntimeContext;
+  closeOnSuspend?: boolean;
+  tracingOptions?: TracingOptions;
 }) {
   try {
     if (!workflowId) {
@@ -446,38 +508,43 @@ export async function streamVNextWorkflowHandler({
       throw new HTTPException(404, { message: 'Workflow not found' });
     }
 
+    const serverCache = mastra.getServerCache();
+
     const run = await workflow.createRunAsync({ runId });
-    const result = run.streamVNext({
+    const result = run.stream({
       inputData,
       runtimeContext,
+      closeOnSuspend,
+      tracingOptions,
     });
-    return result;
+    return result.fullStream.pipeThrough(
+      new TransformStream<ChunkType, ChunkType>({
+        transform(chunk, controller) {
+          if (serverCache) {
+            const cacheKey = runId;
+            serverCache.listPush(cacheKey, chunk).catch(() => {});
+          }
+          controller.enqueue(chunk);
+        },
+      }),
+    );
   } catch (error) {
     return handleError(error, 'Error streaming workflow');
   }
 }
 
-export async function resumeAsyncWorkflowHandler({
+export async function observeStreamVNextWorkflowHandler({
   mastra,
   workflowId,
   runId,
-  body,
-  runtimeContext,
-}: WorkflowContext & {
-  body: { step: string | string[]; resumeData?: unknown };
-  runtimeContext?: RuntimeContext;
-}) {
+}: Pick<WorkflowContext, 'mastra' | 'workflowId' | 'runId'>) {
   try {
     if (!workflowId) {
       throw new HTTPException(400, { message: 'Workflow ID is required' });
     }
 
     if (!runId) {
-      throw new HTTPException(400, { message: 'runId required to resume workflow' });
-    }
-
-    if (!body.step) {
-      throw new HTTPException(400, { message: 'step required to resume workflow' });
+      throw new HTTPException(400, { message: 'runId required to observe workflow stream' });
     }
 
     const { workflow } = await getWorkflowsFromSystem({ mastra, workflowId });
@@ -492,11 +559,102 @@ export async function resumeAsyncWorkflowHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
+    const serverCache = mastra.getServerCache();
+    if (!serverCache) {
+      throw new HTTPException(500, { message: 'Server cache not found' });
+    }
+
+    // Get cached chunks first
+    const cachedRunChunks = await serverCache.listFromTo(runId, 0);
+
+    // Create a readable stream that first emits cached chunks, then the live stream
+    const combinedStream = new ReadableStream<ChunkType>({
+      start(controller) {
+        // First, emit all cached chunks
+        const emitCachedChunks = async () => {
+          for (const chunk of cachedRunChunks) {
+            controller.enqueue(chunk as ChunkType);
+          }
+        };
+
+        // Then, pipe the live stream
+        const liveStream = _run.observeStream();
+        const reader = liveStream.getReader();
+
+        const pump = async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                controller.close();
+                break;
+              }
+              controller.enqueue(value);
+            }
+          } catch (error) {
+            controller.error(error);
+          } finally {
+            reader.releaseLock();
+          }
+        };
+
+        // Start with cached chunks, then live stream
+        void emitCachedChunks()
+          .then(() => {
+            void pump();
+          })
+          .catch(error => {
+            controller.error(error);
+          });
+      },
+    });
+
+    return combinedStream;
+  } catch (error) {
+    return handleError(error, 'Error observing workflow stream');
+  }
+}
+
+export async function resumeAsyncWorkflowHandler({
+  mastra,
+  workflowId,
+  runId,
+  body,
+  runtimeContext,
+  tracingOptions,
+}: WorkflowContext & {
+  body: { step: string | string[]; resumeData?: unknown };
+  runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
+}) {
+  try {
+    if (!workflowId) {
+      throw new HTTPException(400, { message: 'Workflow ID is required' });
+    }
+
+    if (!runId) {
+      throw new HTTPException(400, { message: 'runId required to resume workflow' });
+    }
+
+    const { workflow } = await getWorkflowsFromSystem({ mastra, workflowId });
+
+    if (!workflow) {
+      throw new HTTPException(404, { message: 'Workflow not found' });
+    }
+
+    const run = await workflow.getWorkflowRunById(runId);
+
+    if (!run) {
+      throw new HTTPException(404, { message: 'Workflow run not found' });
+    }
+
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
     const result = await _run.resume({
       step: body.step,
       resumeData: body.resumeData,
       runtimeContext,
+      tracingOptions,
     });
 
     return result;
@@ -511,9 +669,11 @@ export async function resumeWorkflowHandler({
   runId,
   body,
   runtimeContext,
+  tracingOptions,
 }: WorkflowContext & {
   body: { step: string | string[]; resumeData?: unknown };
   runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
 }) {
   try {
     if (!workflowId) {
@@ -522,10 +682,6 @@ export async function resumeWorkflowHandler({
 
     if (!runId) {
       throw new HTTPException(400, { message: 'runId required to resume workflow' });
-    }
-
-    if (!body.step) {
-      throw new HTTPException(400, { message: 'step required to resume workflow' });
     }
 
     const { workflow } = await getWorkflowsFromSystem({ mastra, workflowId });
@@ -540,12 +696,13 @@ export async function resumeWorkflowHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
 
     void _run.resume({
       step: body.step,
       resumeData: body.resumeData,
       runtimeContext,
+      tracingOptions,
     });
 
     return { message: 'Workflow run resumed' };
@@ -554,7 +711,69 @@ export async function resumeWorkflowHandler({
   }
 }
 
-export async function getWorkflowRunsHandler({
+export async function resumeStreamWorkflowHandler({
+  mastra,
+  workflowId,
+  runId,
+  body,
+  runtimeContext,
+  tracingOptions,
+}: WorkflowContext & {
+  body: { step: string | string[]; resumeData?: unknown };
+  runtimeContext?: RuntimeContext;
+  tracingOptions?: TracingOptions;
+}) {
+  try {
+    if (!workflowId) {
+      throw new HTTPException(400, { message: 'Workflow ID is required' });
+    }
+
+    if (!runId) {
+      throw new HTTPException(400, { message: 'runId required to resume workflow' });
+    }
+
+    const { workflow } = await getWorkflowsFromSystem({ mastra, workflowId });
+
+    if (!workflow) {
+      throw new HTTPException(404, { message: 'Workflow not found' });
+    }
+
+    const run = await workflow.getWorkflowRunById(runId);
+
+    if (!run) {
+      throw new HTTPException(404, { message: 'Workflow run not found' });
+    }
+
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
+    const serverCache = mastra.getServerCache();
+
+    const stream = _run
+      .resumeStream({
+        step: body.step,
+        resumeData: body.resumeData,
+        runtimeContext,
+        tracingOptions,
+      })
+      .fullStream.pipeThrough(
+        new TransformStream<ChunkType, ChunkType>({
+          transform(chunk, controller) {
+            if (serverCache) {
+              const cacheKey = runId;
+              serverCache.listPush(cacheKey, chunk).catch(() => {});
+            }
+
+            controller.enqueue(chunk);
+          },
+        }),
+      );
+
+    return stream;
+  } catch (error) {
+    return handleError(error, 'Error resuming workflow');
+  }
+}
+
+export async function listWorkflowRunsHandler({
   mastra,
   workflowId,
   fromDate,
@@ -580,7 +799,7 @@ export async function getWorkflowRunsHandler({
       throw new HTTPException(404, { message: 'Workflow not found' });
     }
 
-    const workflowRuns = (await workflow.getWorkflowRuns({ fromDate, toDate, limit, offset, resourceId })) || {
+    const workflowRuns = (await workflow.listWorkflowRuns({ fromDate, toDate, limit, offset, resourceId })) || {
       runs: [],
       total: 0,
     };
@@ -616,7 +835,7 @@ export async function cancelWorkflowRunHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
 
     await _run.cancel();
 
@@ -657,7 +876,7 @@ export async function sendWorkflowRunEventHandler({
       throw new HTTPException(404, { message: 'Workflow run not found' });
     }
 
-    const _run = await workflow.createRunAsync({ runId });
+    const _run = await workflow.createRunAsync({ runId, resourceId: run.resourceId });
 
     await _run.sendEvent(event, data);
 
